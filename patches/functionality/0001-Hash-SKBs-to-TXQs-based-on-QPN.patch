@@ -1,0 +1,60 @@
+From 5c4657e7ce8b767bb94484f4d607c94a230a070f Mon Sep 17 00:00:00 2001
+From: Ian Ziemba <ian.ziemba@hpe.com>
+Date: Thu, 14 Jul 2022 17:14:41 -0500
+Subject: [PATCH] Hash SKBs to TXQs based on QPN
+
+Since RXE uses a single socket for all QPs, packets tend to use the same
+TXQ.
+
+Add the ability to hash SKBs to multiple TXQs based on SKB hash. SKB
+hash is set to the QPN.
+
+NETCASSINI-4006
+
+Signed-off-by: Ian Ziemba <ian.ziemba@hpe.com>
+---
+ rxe/rxe_net.c | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/rxe/rxe_net.c b/rxe/rxe_net.c
+index ffc84a7..e1613a5 100644
+--- a/rxe/rxe_net.c
++++ b/rxe/rxe_net.c
+@@ -18,6 +18,10 @@
+ #include "rxe_net.h"
+ #include "rxe_loc.h"
+ 
++static bool skb_hash_to_txq = true;
++module_param(skb_hash_to_txq, bool, 0444);
++MODULE_PARM_DESC(skb_hash_to_txq, "Select TXQ based on SKB QPN hash");
++
+ static struct rxe_recv_sockets recv_sockets;
+ 
+ static struct dst_entry *rxe_find_route4(struct net_device *ndev,
+@@ -444,6 +448,14 @@ static bool rxe_neigh_valid(struct neighbour *n)
+ 	return true;
+ }
+ 
++u16 rxe_netdev_pick_tx(struct net_device *dev, struct sk_buff *skb,
++		       struct net_device *sb_dev)
++{
++	if (skb_hash_to_txq)
++		return (u16)skb_get_hash(skb) % dev->real_num_tx_queues;
++	return netdev_pick_tx(dev, skb, sb_dev);
++}
++
+ struct netdev_queue *rxe_netdev_core_pick_tx(struct net_device *dev,
+ 					     struct sk_buff *skb,
+ 					     struct net_device *sb_dev)
+@@ -463,7 +475,7 @@ struct netdev_queue *rxe_netdev_core_pick_tx(struct net_device *dev,
+ 		if (ops->ndo_select_queue)
+ 			queue_index = ops->ndo_select_queue(dev, skb, sb_dev);
+ 		else
+-			queue_index = netdev_pick_tx(dev, skb, sb_dev);
++			queue_index = rxe_netdev_pick_tx(dev, skb, sb_dev);
+ 
+ 		queue_index = netdev_cap_txqueue(dev, queue_index);
+ 	}
+-- 
+2.26.2
+

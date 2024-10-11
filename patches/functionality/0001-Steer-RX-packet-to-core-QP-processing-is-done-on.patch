@@ -1,0 +1,357 @@
+From de3be07d06d1fb8a119d56bd5dc3b2ab6f54cbae Mon Sep 17 00:00:00 2001
+From: Ian Ziemba <ian.ziemba@hpe.com>
+Date: Thu, 21 Jul 2022 08:31:14 -0500
+Subject: [PATCH] Steer RX packet to core QP processing is done on
+
+A recv task is created for each possible QP. Packets are steered to
+specific recv tasks based on the comp_vector associated with the QP. If
+no comp_vector is defined, packets are steer to core zero.
+
+NETCASSINI-4024
+
+Signed-off-by: Ian Ziemba <ian.ziemba@hpe.com>
+---
+ rxe/rxe.c       |  44 ++++------------
+ rxe/rxe.h       |   6 ++-
+ rxe/rxe_net.c   |  21 ++------
+ rxe/rxe_recv.c  | 133 ++++++++++++++++++++++++++++++++++++++++++++----
+ rxe/rxe_verbs.h |  10 ++--
+ 5 files changed, 142 insertions(+), 72 deletions(-)
+
+diff --git a/rxe/rxe.c b/rxe/rxe.c
+index 819a265..a68b239 100644
+--- a/rxe/rxe.c
++++ b/rxe/rxe.c
+@@ -19,20 +19,6 @@ MODULE_LICENSE("Dual BSD/GPL");
+ void rxe_dealloc(struct ib_device *ib_dev)
+ {
+ 	struct rxe_dev *rxe = container_of(ib_dev, struct rxe_dev, ib_dev);
+-	struct sk_buff *skb;
+-	int i;
+-
+-	for (i = 0; i < RXE_MAX_PROC; i++) {
+-		struct rcv_proc *rcv_proc = &rxe->rcv_procs[i];
+-
+-		cancel_work_sync(&rcv_proc->work);
+-		destroy_workqueue(rcv_proc->wq);
+-
+-		while ((skb = skb_dequeue(&rcv_proc->skbq))) {
+-			ib_device_put(&rxe->ib_dev);
+-			kfree_skb(skb);
+-		}
+-	}
+ 
+ 	rxe_pool_cleanup(&rxe->uc_pool);
+ 	rxe_pool_cleanup(&rxe->pd_pool);
+@@ -45,6 +31,8 @@ void rxe_dealloc(struct ib_device *ib_dev)
+ 
+ 	WARN_ON(!RB_EMPTY_ROOT(&rxe->mcg_tree));
+ 
++	rxe_recv_tasks_cleanup(rxe);
++
+ 	if (rxe->tfm)
+ 		crypto_free_shash(rxe->tfm);
+ }
+@@ -143,25 +131,17 @@ static void rxe_init_pools(struct rxe_dev *rxe)
+ /* initialize rxe device state */
+ static void rxe_init(struct rxe_dev *rxe)
+ {
+-	int i;
++	int err;
+ 
+ 	/* init default device parameters */
+ 	rxe_init_device_param(rxe);
+ 
+ 	rxe_init_ports(rxe);
+-	rxe_init_pools(rxe);
+-
+-	for (i = 0; i < RXE_MAX_PROC; i++) {
+-		struct rcv_proc *rcv_proc = &rxe->rcv_procs[i];
+-
+-		rcv_proc->wq = alloc_ordered_workqueue("rxe", WQ_UNBOUND);
+-		if (!rcv_proc->wq)
+-			goto err;
++	err = rxe_recv_tasks_init(rxe);
++	if (err)
++		return;
+ 
+-		skb_queue_head_init(&rcv_proc->skbq);
+-		INIT_WORK(&rcv_proc->work, recv_worker);
+-		rcv_proc->rxe = rxe;
+-	}
++	rxe_init_pools(rxe);
+ 
+ 	/* init pending mmap list */
+ 	spin_lock_init(&rxe->mmap_offset_lock);
+@@ -174,14 +154,6 @@ static void rxe_init(struct rxe_dev *rxe)
+ 
+ 	mutex_init(&rxe->usdev_lock);
+ 	return;
+-
+-err:
+-	for (i = 0; i < RXE_MAX_PROC; i++) {
+-		struct rcv_proc *rcv_proc = &rxe->rcv_procs[i];
+-
+-		if (rcv_proc->wq)
+-			destroy_workqueue(rcv_proc->wq);
+-	}
+ }
+ 
+ void rxe_set_mtu(struct rxe_dev *rxe, unsigned int ndev_mtu)
+diff --git a/rxe/rxe.h b/rxe/rxe.h
+index 184377d..96659fa 100644
+--- a/rxe/rxe.h
++++ b/rxe/rxe.h
+@@ -103,7 +103,9 @@ void rxe_set_mtu(struct rxe_dev *rxe, unsigned int dev_mtu);
+ 
+ int rxe_add(struct rxe_dev *rxe, unsigned int mtu, const char *ibdev_name);
+ 
+-void rxe_rcv(struct sk_buff *skb);
++void rxe_recv_tasks_queue(struct rxe_dev *rxe, struct sk_buff *skb);
++void rxe_recv_tasks_cleanup(struct rxe_dev *rxe);
++int rxe_recv_tasks_init(struct rxe_dev *rxe);
+ 
+ /* The caller must do a matching ib_device_put(&dev->ib_dev) */
+ static inline struct rxe_dev *rxe_get_dev_from_net(struct net_device *ndev)
+diff --git a/rxe/rxe_net.c b/rxe/rxe_net.c
+index e1613a5..7951a7a 100644
+--- a/rxe/rxe_net.c
++++ b/rxe/rxe_net.c
+@@ -187,7 +187,7 @@ static void udp_encap_recv(struct rxe_dev *rxe, struct sk_buff *skb)
+ 	pkt->hdr = (u8 *)(udph + 1);
+ 	pkt->paylen = be16_to_cpu(udph->len) - sizeof(*udph);
+ 
+-	rxe_rcv(skb);
++	rxe_recv_tasks_queue(rxe, skb);
+ 	return;
+ 
+ drop:
+@@ -196,21 +196,10 @@ drop:
+ 	return;
+ }
+ 
+-void recv_worker(struct work_struct *work)
+-{
+-	struct rcv_proc *rcv_proc =
+-		container_of(work, struct rcv_proc, work);
+-	struct sk_buff *skb;
+-
+-	while ((skb = skb_dequeue(&rcv_proc->skbq)))
+-		udp_encap_recv(rcv_proc->rxe, skb);
+-}
+-
+ static int rxe_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
+ {
+ 	struct rxe_dev *rxe;
+ 	struct net_device *ndev = skb->dev;
+-	struct rcv_proc *rcv_proc;
+ 
+ 	/* takes a reference on rxe->ib_dev
+ 	 * drop when skb is freed
+@@ -221,11 +210,7 @@ static int rxe_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
+ 	if (!rxe)
+ 		goto drop;
+ 
+-	rcv_proc = &rxe->rcv_procs[skb_get_hash(skb) & (RXE_MAX_PROC - 1)];
+-
+-	skb_queue_tail(&rcv_proc->skbq, skb);
+-
+-	queue_work(rcv_proc->wq, &rcv_proc->work);
++	udp_encap_recv(rxe, skb);
+ 
+ 	return 0;
+ 
+@@ -615,11 +600,11 @@ void rxe_loopback(struct sk_buff *skb)
+ 	if (WARN_ON(!ib_device_try_get(&pkt->rxe->ib_dev))) {
+ 		kfree_skb(skb);
+ 		return -EIO;
+	}
+
+-	rxe_rcv(skb);
++	rxe_recv_tasks_queue(pkt->rxe, skb);
+
+	return 0;
+ }
+ 
+ int rxe_xmit_packet(struct rxe_qp *qp, struct rxe_pkt_info *pkt,
+diff --git a/rxe/rxe_recv.c b/rxe/rxe_recv.c
+index e1279e5..2e3f84d 100644
+--- a/rxe/rxe_recv.c
++++ b/rxe/rxe_recv.c
+@@ -176,16 +176,6 @@ static int hdr_check(struct rxe_pkt_info *pkt)
+ 	int index;
+ 	int err;
+ 
+-	if (unlikely(bth_tver(pkt) != BTH_TVER)) {
+-		pr_warn_ratelimited("bad tver\n");
+-		goto err1;
+-	}
+-
+-	if (unlikely(qpn == 0)) {
+-		pr_warn_once("QP 0 not supported");
+-		goto err1;
+-	}
+-
+ 	if (qpn != IB_MULTICAST_QPN) {
+ 		index = (qpn == 1) ? port->qp_gsi_index : qpn;
+ 
+@@ -426,3 +416,126 @@ drop:
+ 	kfree_skb(skb);
+ 	ib_device_put(&rxe->ib_dev);
+ }
++
++static int rxe_recv_task(void *context)
++{
++	struct rxe_recv_task *task = context;
++	struct sk_buff *skb;
++
++	while ((skb = skb_dequeue(&task->skbq)))
++		rxe_rcv(skb);
++
++	return -EAGAIN;
++}
++
++static void rxe_recv_task_cleanup(struct rxe_recv_task *task)
++{
++	rxe_cleanup_task(&task->task);
++}
++
++static int rxe_recv_task_init(struct rxe_dev *rxe, struct rxe_recv_task *task,
++			      int cpu)
++{
++	skb_queue_head_init(&task->skbq);
++	return rxe_init_task(rxe, &task->task, task, rxe_recv_task, "recv_task",
++			     cpu);
++}
++
++void rxe_recv_tasks_queue(struct rxe_dev *rxe, struct sk_buff *skb)
++{
++	struct rxe_pkt_info *pkt = SKB_TO_PKT(skb);
++	struct rxe_port *port = &rxe->port;
++	struct rxe_recv_task *task;
++	struct rxe_qp *qp;
++	u32 qpn = bth_qpn(pkt);
++	int index;
++	int cpu;
++
++	if (unlikely(bth_tver(pkt) != BTH_TVER)) {
++		pr_warn_ratelimited("bad tver\n");
++		goto drop;
++	}
++
++	if (unlikely(qpn == 0)) {
++		pr_warn_once("QP 0 not supported");
++		goto drop;
++	}
++
++	if (qpn != IB_MULTICAST_QPN) {
++		index = (qpn == 1) ? port->qp_gsi_index : qpn;
++
++		qp = rxe_pool_get_index(&rxe->qp_pool, index);
++		if (unlikely(!qp)) {
++			pr_warn_ratelimited("no qp matches qpn 0x%x\n", qpn);
++			goto drop;
++		}
++
++		if (rxe_opcode[bth_opcode(pkt)].mask & RXE_REQ_MASK)
++			cpu = qp->rcq ? qp->rcq->ibcq.comp_vector : 0;
++		else
++			cpu = qp->scq ? qp->scq->ibcq.comp_vector : 0;
++
++		rxe_put(qp);
++	} else {
++		cpu = 0;
++	}
++
++	if (unlikely(cpu >= num_possible_cpus())) {
++		pr_warn_ratelimited("RFS CPU exceeds num of possible CPUs\n");
++		cpu = 0;
++	}
++
++	task = rxe->recv_tasks + cpu;
++	skb_queue_tail(&task->skbq, skb);
++	rxe_run_task(&task->task, 1);
++
++	return;
++
++drop:
++	kfree_skb(skb);
++	ib_device_put(&rxe->ib_dev);
++}
++
++void rxe_recv_tasks_cleanup(struct rxe_dev *rxe)
++{
++	int i;
++	struct rxe_recv_task *task;
++
++	for (i = 0; i < num_possible_cpus(); i++) {
++		task = rxe->recv_tasks + i;
++		rxe_recv_task_cleanup(task);
++	}
++
++	kfree(rxe->recv_tasks);
++}
++
++int rxe_recv_tasks_init(struct rxe_dev *rxe)
++{
++	int i;
++	struct rxe_recv_task *task;
++	int err;
++
++	rxe->recv_tasks = kcalloc(num_possible_cpus(), sizeof(*rxe->recv_tasks),
++				  GFP_KERNEL);
++	if (!rxe->recv_tasks)
++		return -ENOMEM;
++
++	for (i = 0; i < num_possible_cpus(); i++) {
++		task = rxe->recv_tasks + i;
++		err = rxe_recv_task_init(rxe, task, i);
++		if (err)
++			goto err_cleanup_task;
++	}
++
++	return 0;
++
++err_cleanup_task:
++	for (i--; i >= 0; i--) {
++		task = rxe->recv_tasks + i;
++		rxe_recv_task_cleanup(task);
++	}
++
++	kfree(rxe->recv_tasks);
++
++	return err;
++}
+diff --git a/rxe/rxe_verbs.h b/rxe/rxe_verbs.h
+index 2499156..879cf02 100644
+--- a/rxe/rxe_verbs.h
++++ b/rxe/rxe_verbs.h
+@@ -397,14 +397,10 @@ struct rxe_port {
+ 	u32			qp_gsi_index;
+ };
+ 
+-/* Number of parallel workers available for processing. Power of 2. */
+-#define RXE_MAX_PROC 8
+ struct rxe_dev;
+-struct rcv_proc {
++struct rxe_recv_task {
+ 	struct sk_buff_head skbq;
+-	struct workqueue_struct *wq;
+-	struct work_struct work;
+-	struct rxe_dev *rxe;
++	struct rxe_task task;
+ };
+ 
+ struct rxe_dev {
+@@ -441,7 +437,7 @@ struct rxe_dev {
+ 	struct rxe_port		port;
+ 	struct crypto_shash	*tfm;
+ 
+-	struct rcv_proc rcv_procs[RXE_MAX_PROC];
++	struct rxe_recv_task	*recv_tasks;
+ };
+ 
+ void recv_worker(struct work_struct *work);
+-- 
+2.26.2
+

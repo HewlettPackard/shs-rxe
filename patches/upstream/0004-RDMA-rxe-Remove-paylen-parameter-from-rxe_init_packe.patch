@@ -1,0 +1,89 @@
+From 751cdce99c69c72e13e082577201e021750c3c08 Mon Sep 17 00:00:00 2001
+From: Bob Pearson <rpearsonhpe@gmail.com>
+Date: Wed, 5 Jul 2023 14:15:29 -0500
+Subject: [PATCH 04/17] RDMA/rxe: Remove paylen parameter from rxe_init_packet
+
+Remove paylen as a parameter to rxe_init_packet() since it
+is already available in pkt.
+
+Signed-off-by: Bob Pearson <rpearsonhpe@gmail.com>
+---
+ drivers/infiniband/sw/rxe/rxe_loc.h  | 2 +-
+ drivers/infiniband/sw/rxe/rxe_net.c  | 7 ++++---
+ drivers/infiniband/sw/rxe/rxe_req.c  | 2 +-
+ drivers/infiniband/sw/rxe/rxe_resp.c | 2 +-
+ 4 files changed, 7 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/infiniband/sw/rxe/rxe_loc.h b/drivers/infiniband/sw/rxe/rxe_loc.h
+index 666e06a82bc9..cf38f4dcff78 100644
+--- a/drivers/infiniband/sw/rxe/rxe_loc.h
++++ b/drivers/infiniband/sw/rxe/rxe_loc.h
+@@ -90,7 +90,7 @@ void rxe_mw_cleanup(struct rxe_pool_elem *elem);
+ 
+ /* rxe_net.c */
+ struct sk_buff *rxe_init_packet(struct rxe_dev *rxe, struct rxe_av *av,
+-				int paylen, struct rxe_pkt_info *pkt);
++				struct rxe_pkt_info *pkt);
+ int rxe_prepare(struct rxe_av *av, struct rxe_pkt_info *pkt,
+ 		struct sk_buff *skb);
+ int rxe_xmit_packet(struct rxe_qp *qp, struct rxe_pkt_info *pkt,
+diff --git a/drivers/infiniband/sw/rxe/rxe_net.c b/drivers/infiniband/sw/rxe/rxe_net.c
+index 50179b730498..657111ce58ca 100644
+--- a/drivers/infiniband/sw/rxe/rxe_net.c
++++ b/drivers/infiniband/sw/rxe/rxe_net.c
+@@ -511,7 +511,7 @@ int rxe_xmit_packet(struct rxe_qp *qp, struct rxe_pkt_info *pkt,
+ }
+ 
+ struct sk_buff *rxe_init_packet(struct rxe_dev *rxe, struct rxe_av *av,
+-				int paylen, struct rxe_pkt_info *pkt)
++				struct rxe_pkt_info *pkt)
+ {
+ 	unsigned int hdr_len;
+ 	struct sk_buff *skb = NULL;
+@@ -476,7 +476,7 @@ struct sk_buff *rxe_init_packet(struct rxe_dev *rxe, struct rxe_av *av,
+ 		rcu_read_unlock();
+ 		goto out;
+ 	}
+-	skb = alloc_skb(paylen + hdr_len + LL_RESERVED_SPACE(ndev),
++	skb = alloc_skb(pkt->paylen + hdr_len + LL_RESERVED_SPACE(ndev),
+ 			GFP_ATOMIC);
+ 
+ 	if (unlikely(!skb)) {
+@@ -541,7 +542,7 @@ struct sk_buff *rxe_init_packet(struct rxe_dev *rxe, struct rxe_av *av,
+ 
+ 	pkt->rxe	= rxe;
+ 	pkt->port_num	= port_num;
+-	pkt->hdr	= skb_put(skb, paylen);
++	pkt->hdr	= skb_put(skb, pkt->paylen);
+ 	pkt->mask	|= RXE_GRH_MASK;
+ 
+ out:
+diff --git a/drivers/infiniband/sw/rxe/rxe_req.c b/drivers/infiniband/sw/rxe/rxe_req.c
+index 95f08af37261..2d0c90df2c25 100644
+--- a/drivers/infiniband/sw/rxe/rxe_req.c
++++ b/drivers/infiniband/sw/rxe/rxe_req.c
+@@ -511,7 +511,7 @@ static struct sk_buff *init_req_packet(struct rxe_qp *qp,
+ 			pkt->pad + RXE_ICRC_SIZE;
+ 
+ 	/* init skb */
+-	skb = rxe_init_packet(rxe, av, pkt->paylen, pkt);
++	skb = rxe_init_packet(rxe, av, pkt);
+ 	if (unlikely(!skb))
+ 		return NULL;
+ 
+diff --git a/drivers/infiniband/sw/rxe/rxe_resp.c b/drivers/infiniband/sw/rxe/rxe_resp.c
+index fc2f55329fa2..7e79d3e4d64e 100644
+--- a/drivers/infiniband/sw/rxe/rxe_resp.c
++++ b/drivers/infiniband/sw/rxe/rxe_resp.c
+@@ -775,7 +775,7 @@ static struct sk_buff *prepare_ack_packet(struct rxe_qp *qp,
+ 	ack->paylen = rxe_opcode[opcode].length + payload +
+ 			ack->pad + RXE_ICRC_SIZE;
+ 
+-	skb = rxe_init_packet(rxe, &qp->pri_av, ack->paylen, ack);
++	skb = rxe_init_packet(rxe, &qp->pri_av, ack);
+ 	if (!skb)
+ 		return NULL;
+ 
+-- 
+2.39.2
+

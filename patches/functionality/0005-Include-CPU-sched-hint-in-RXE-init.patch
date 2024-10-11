@@ -1,0 +1,81 @@
+From 36ae212131012411b7284b2e49ca18a750489e94 Mon Sep 17 00:00:00 2001
+From: Ian Ziemba <ian.ziemba@hpe.com>
+Date: Tue, 21 Jun 2022 15:22:46 -0500
+Subject: [PATCH 5/9] Include CPU sched hint in RXE init
+
+The CPU passed into RXE init can be used as a hint for which core the
+task should be schedule on.
+
+Signed-off-by: Ian Ziemba <ian.ziemba@hpe.com>
+---
+ rxe/rxe_qp.c   | 9 ++++++---
+ rxe/rxe_task.c | 5 +++--
+ rxe/rxe_task.h | 4 +++-
+ 3 files changed, 12 insertions(+), 6 deletions(-)
+
+diff --git a/rxe/rxe_qp.c b/rxe/rxe_qp.c
+index 9bd5344..3b642a1 100644
+--- a/rxe/rxe_qp.c
++++ b/rxe/rxe_qp.c
+@@ -266,7 +266,7 @@ static int rxe_qp_init_req(struct rxe_dev *rxe, struct rxe_qp *qp,
+
+ 	skb_queue_head_init(&qp->req_pkts);
+ 
+-	rxe_init_task(&qp->send_task, qp, rxe_sender);
++	rxe_init_task(&qp->send_task, qp, rxe_sender, 0);
+ 
+ 	qp->qp_timeout_jiffies = 0; /* Can't be set for UD/UC in modify_qp */
+ 	if (init->qp_type == IB_QPT_RC) {
+@@ -319,7 +321,7 @@ static int rxe_qp_init_resp(struct rxe_dev *rxe, struct rxe_qp *qp,
+ 
+ 	skb_queue_head_init(&qp->resp_pkts);
+ 
+-	rxe_init_task(&qp->recv_task, qp, rxe_receiver);
++	rxe_init_task(&qp->recv_task, qp, rxe_receiver, 0);
+ 
+ 	qp->resp.opcode		= OPCODE_NONE;
+ 	qp->resp.msn		= 0;
+diff --git a/rxe/rxe_task.c b/rxe/rxe_task.c
+index 1501120..b7b4259 100644
+--- a/rxe/rxe_task.c
++++ b/rxe/rxe_task.c
+@@ -188,13 +188,14 @@ static void do_work(struct work_struct *work)
+ }
+ 
+ int rxe_init_task(struct rxe_task *task, struct rxe_qp *qp,
+-		  int (*func)(struct rxe_qp *))
++		  int (*func)(struct rxe_qp *), int sched_cpu_hint)
+ {
+ 	WARN_ON(rxe_read(qp) <= 0);
+ 
+ 	task->qp = qp;
+ 	task->func = func;
+ 	task->state = TASK_STATE_IDLE;
++	task->sched_cpu_hint = sched_cpu_hint;
+ 	spin_lock_init(&task->lock);
+ 	INIT_WORK(&task->work, do_work);
+ 
+diff --git a/rxe/rxe_task.h b/rxe/rxe_task.h
+index a63e258..3a05463 100644
+--- a/rxe/rxe_task.h
++++ b/rxe/rxe_task.h
+@@ -30,6 +30,7 @@ struct rxe_task {
+ 	int			ret;
+ 	long			num_sched;
+ 	long			num_done;
++	int			sched_cpu_hint;
+ };
+ 
+ int rxe_alloc_wq(void);
+@@ -42,7 +43,7 @@ void rxe_destroy_wq(void);
+  *	func => function to call until it returns != 0
+  */
+ int rxe_init_task(struct rxe_task *task, struct rxe_qp *qp,
+-		  int (*func)(struct rxe_qp *));
++		  int (*func)(struct rxe_qp *), int sched_cpu_hint);
+ 
+ /* cleanup task */
+ void rxe_cleanup_task(struct rxe_task *task);
+-- 
+2.26.2
+

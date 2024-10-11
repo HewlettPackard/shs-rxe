@@ -1,0 +1,95 @@
+From 4c1e397bfe4059a275d3411832473fdd2b519520 Mon Sep 17 00:00:00 2001
+From: Bob Pearson <rpearsonhpe@gmail.com>
+Date: Wed, 5 Jul 2023 14:21:39 -0500
+Subject: [PATCH 07/17] RDMA/rxe: Combine setting pkt info
+
+Move setting some rxe_pkt_info fields in rxe_init_packet() together
+with the rest of the fields in rxe_init_req_packet() and
+prepare_ack_packet().
+
+Signed-off-by: Bob Pearson <rpearsonhpe@gmail.com>
+---
+ drivers/infiniband/sw/rxe/rxe_net.c  |  6 ------
+ drivers/infiniband/sw/rxe/rxe_req.c  |  4 +++-
+ drivers/infiniband/sw/rxe/rxe_resp.c | 12 ++++++++----
+ 3 files changed, 11 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/infiniband/sw/rxe/rxe_net.c b/drivers/infiniband/sw/rxe/rxe_net.c
+index 657111ce58ca..e04c2c2c8de7 100644
+--- a/drivers/infiniband/sw/rxe/rxe_net.c
++++ b/drivers/infiniband/sw/rxe/rxe_net.c
+@@ -516,7 +516,6 @@ struct sk_buff *rxe_init_packet(struct rxe_dev *rxe, struct rxe_av *av,
+ 	struct sk_buff *skb = NULL;
+ 	struct net_device *ndev = rxe->ndev;
+ 	const struct ib_gid_attr *attr;
+-	const int port_num = 1;
+ 
+ 	attr = rdma_get_gid_attr(&rxe->ib_dev, port_num, av->grh.sgid_index);
+ 	if(IS_ERR(attr))
+@@ -540,11 +539,6 @@ struct sk_buff *rxe_init_packet(struct rxe_dev *rxe, struct rxe_av *av,
+ 	else
+ 		skb->protocol = htons(ETH_P_IPV6);
+ 
+-	pkt->rxe	= rxe;
+-	pkt->port_num	= port_num;
+-	pkt->hdr	= skb_put(skb, pkt->paylen);
+-	pkt->mask	|= RXE_GRH_MASK;
+-
+ out:
+ 	rdma_put_gid_attr(attr);
+ 	return skb;
+diff --git a/drivers/infiniband/sw/rxe/rxe_req.c b/drivers/infiniband/sw/rxe/rxe_req.c
+index 2ca32fe2f8ed..d10097b6aa5a 100644
+--- a/drivers/infiniband/sw/rxe/rxe_req.c
++++ b/drivers/infiniband/sw/rxe/rxe_req.c
+@@ -512,7 +512,7 @@ static struct sk_buff *rxe_init_req_packet(struct rxe_qp *qp,
+ 	pkt->opcode = opcode;
+ 	pkt->qp = qp;
+ 	pkt->psn = qp->req.psn;
+-	pkt->mask = rxe_opcode[opcode].mask;
++	pkt->mask = rxe_opcode[opcode].mask | RXE_GRH_MASK;
+ 	pkt->wqe = wqe;
+ 	pkt->port_num = 1;
+ 
+@@ -535,6 +535,8 @@ static struct sk_buff *rxe_init_req_packet(struct rxe_qp *qp,
+ 		goto err_out;
+ 	}
+ 
++	pkt->hdr = skb_put(skb, pkt->paylen);
++
+ 	/* init roce headers */
+ 	rxe_init_roce_hdrs(qp, wqe, pkt);
+ 
+diff --git a/drivers/infiniband/sw/rxe/rxe_resp.c b/drivers/infiniband/sw/rxe/rxe_resp.c
+index 7e79d3e4d64e..8a25c56dfd86 100644
+--- a/drivers/infiniband/sw/rxe/rxe_resp.c
++++ b/drivers/infiniband/sw/rxe/rxe_resp.c
+@@ -768,6 +768,13 @@ static struct sk_buff *prepare_ack_packet(struct rxe_qp *qp,
+ 	struct sk_buff *skb;
+ 	int err;
+ 
++	ack->rxe = rxe;
++	ack->qp = qp;
++	ack->opcode = opcode;
++	ack->mask = rxe_opcode[opcode].mask | RXE_GRH_MASK;
++	ack->psn = psn;
++	ack->port_num = 1;
++
+ 	/*
+ 	 * allocate packet
+ 	 */
+@@ -779,10 +786,7 @@ static struct sk_buff *prepare_ack_packet(struct rxe_qp *qp,
+ 	if (!skb)
+ 		return NULL;
+ 
+-	ack->qp = qp;
+-	ack->opcode = opcode;
+-	ack->mask = rxe_opcode[opcode].mask;
+-	ack->psn = psn;
++	ack->hdr = skb_put(skb, ack->paylen);
+ 
+ 	bth_init(ack, opcode, 0, 0, ack->pad, IB_DEFAULT_PKEY_FULL,
+ 		 qp->attr.dest_qp_num, 0, psn);
+-- 
+2.39.2
+

@@ -1,0 +1,22 @@
+diff --git a/rxe/rxe_mr.c b/rxe/rxe_mr.c
+index 0378ca9..f3ab094 100644
+--- a/rxe/rxe_mr.c
++++ b/rxe/rxe_mr.c
+@@ -421,7 +421,7 @@ static int rxe_mr_copy_xarray(struct sk_buff *skb, struct rxe_mr *mr,
+ 			break;
+ 		case RXE_FRAG_TO_MR:
+ 			va = kmap_local_page(page);
+-			err = skb_copy_bits(skb, skb_offset, va, bytes);
++			err = skb_copy_bits(skb, skb_offset, va + page_offset, bytes);
+ 			kunmap_local(va);
+ 			skb_offset += bytes;
+ 			break;
+@@ -472,7 +472,7 @@ static int rxe_mr_copy_dma(struct sk_buff *skb, struct rxe_mr *mr,
+ 			break;
+ 		case RXE_FRAG_TO_MR:
+ 			va = kmap_local_page(page);
+-			err = skb_copy_bits(skb, skb_offset, va, bytes);
++			err = skb_copy_bits(skb, skb_offset, va + page_offset, bytes);
+ 			kunmap_local(va);
+ 			skb_offset += bytes;
+ 			break;

@@ -1,0 +1,47 @@
+diff --git a/roce/rxe/rxe_resp.c b/roce/rxe/rxe_resp.c
+index c7e3b6a..27c0f4e 100644
+--- a/roce/rxe/rxe_resp.c
++++ b/roce/rxe/rxe_resp.c
+@@ -448,13 +449,17 @@ static enum resp_states check_rkey(struct rxe_qp *qp,
+ 	if (pkt->mask & (RXE_WRITE_MASK | RXE_ATOMIC_WRITE_MASK)) {
+ 		if (resid > mtu) {
+ 			if (pktlen != mtu || pkt->pad) {
+-				state = RESPST_ERR_LENGTH;
+-				goto err;
++				if ( ((pktlen + RXE_ICRC_SIZE) != mtu) || !is_crc_stripped(pkt) ) {
++					state = RESPST_ERR_LENGTH;
++					goto err;
++				}
+ 			}
+ 		} else {
+ 			if (pktlen != resid) {
+-				state = RESPST_ERR_LENGTH;
+-				goto err;
++				if ( ((pktlen + RXE_ICRC_SIZE) != resid) || !is_crc_stripped(pkt) ) {
++					state = RESPST_ERR_LENGTH;
++					goto err;
++				}
+ 			}
+ 			if ((pkt->pad != (0x3 & (-resid)))) {
+ 				/* This case may not be exactly that
+diff --git a/roce/rxe/rxe_hdr.h b/roce/rxe/rxe_hdr.h
+index 412b8ba..0193539 100644
+--- a/roce/rxe/rxe_hdr.h
++++ b/roce/rxe/rxe_hdr.h
+@@ -922,10 +922,15 @@ static inline void *payload_addr(struct rxe_pkt_info *pkt)
+ 	return pkt->hdr + rxe_opcode[pkt->opcode].offset[RXE_PAYLOAD];
+ }
+ 
++static inline bool is_crc_stripped(struct rxe_pkt_info *pkt)
++{
++	        return (((skb_shinfo(PKT_TO_SKB(pkt))->flags) & BIT(7)) == BIT(7));
++}
++
+ static inline size_t payload_size(struct rxe_pkt_info *pkt)
+ {
+ 	return pkt->paylen - rxe_opcode[pkt->opcode].offset[RXE_PAYLOAD]
+-		- bth_pad(pkt) - RXE_ICRC_SIZE;
++		- bth_pad(pkt) - (is_crc_stripped(pkt) ? 0 : RXE_ICRC_SIZE);
+ }
+ 
+ #endif /* RXE_HDR_H */

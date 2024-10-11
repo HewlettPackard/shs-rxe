@@ -1,0 +1,176 @@
+From 0a9265ae6af5c499d41a88cda1541b4912022c78 Mon Sep 17 00:00:00 2001
+From: Ian Ziemba <ian.ziemba@hpe.com>
+Date: Tue, 21 Jun 2022 15:31:25 -0500
+Subject: [PATCH 7/9] Define QP task sched CPU
+
+The CPU hint passed into the RXE task is based on the corresponding IB
+CQ completion vector.
+
+Signed-off-by: Ian Ziemba <ian.ziemba@hpe.com>
+---
+ rxe/rxe_qp.c | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/rxe/rxe_qp.c b/rxe/rxe_qp.c
+index 3b642a1..67045a6 100644
+--- a/rxe/rxe_qp.c
++++ b/rxe/rxe_qp.c
+@@ -214,6 +214,7 @@ static int rxe_qp_init_req(struct rxe_dev *rxe, struct rxe_qp *qp,
+ 	int err;
+ 	int wqe_size;
+ 	enum queue_type type;
++	int sched_cpu_hint = qp->scq ? qp->scq->ibcq.comp_vector : -1;
+ 
+ 	err = sock_create_kern(&init_net, AF_INET, SOCK_DGRAM, 0, &qp->sk);
+ 	if (err < 0)
+@@ -236,7 +236,7 @@ static int rxe_qp_init_req(struct rxe_dev *rxe, struct rxe_qp *qp,
+ 
+ 	skb_queue_head_init(&qp->req_pkts);
+ 
+-	rxe_init_task(&qp->send_task, qp, rxe_sender, 0);
++	rxe_init_task(&qp->send_task, qp, rxe_sender, sched_cpu_hint);
+ 
+ 	qp->qp_timeout_jiffies = 0; /* Can't be set for UD/UC in modify_qp */
+ 	if (init->qp_type == IB_QPT_RC) {
+@@ -287,6 +288,7 @@ static int rxe_qp_init_resp(struct rxe_dev *rxe, struct rxe_qp *qp,
+ 	int err;
+ 	int wqe_size;
+ 	enum queue_type type;
++	int sched_cpu_hint = qp->rcq ? qp->rcq->ibcq.comp_vector : -1;
+ 
+ 	if (!qp->srq) {
+ 		qp->rq.max_wr		= init->cap.max_recv_wr;
+@@ -281,7 +281,7 @@ static int rxe_qp_init_resp(struct rxe_dev *rxe, struct rxe_qp *qp,
+ 
+ 	skb_queue_head_init(&qp->resp_pkts);
+ 
+-	rxe_init_task(&qp->recv_task, qp, rxe_receiver, 0);
++	rxe_init_task(&qp->recv_task, qp, rxe_receiver, sched_cpu_hint);
+ 
+ 	qp->resp.opcode		= OPCODE_NONE;
+ 	qp->resp.msn		= 0;
+-- 
+2.26.2
+
+diff --git a/rxe/rxe_net.c b/rxe/rxe_net.c
+index cf979ec..8d6f434 100644
+--- a/rxe/rxe_net.c
++++ b/rxe/rxe_net.c
+@@ -185,7 +185,8 @@ static int rxe_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
+ 
+ 	skb_queue_tail(&rcv_proc->skbq, skb);
+ 
+-	queue_work(rcv_proc->wq, &rcv_proc->work);
++	if (!work_pending(&rcv_proc->work)) 
++		queue_work(rcv_proc->wq, &rcv_proc->work);
+ 
+ 	return 0;
+ 
+diff --git a/rxe/rxe_net.c b/rxe/rxe_net.c
+index 8d6f434..945fcc5 100644
+--- a/rxe/rxe_net.c
++++ b/rxe/rxe_net.c
+@@ -161,9 +161,13 @@ void recv_worker(struct work_struct *work)
+ 	struct rcv_proc *rcv_proc =
+ 		container_of(work, struct rcv_proc, work);
+ 	struct sk_buff *skb;
++	int iterations = RXE_MAX_ITERATIONS;
+ 
+-	while ((skb = skb_dequeue(&rcv_proc->skbq)))
++	while (--iterations > 0) { 
++		if (!(skb = skb_dequeue(&rcv_proc->skbq)))
++			break;
+ 		udp_encap_recv(rcv_proc->rxe, skb);
++	}
+ }
+ 
+ static int rxe_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
+diff --git a/rxe/rxe_net.c b/rxe/rxe_net.c
+index 945fcc5..500dd2e 100644
+--- a/rxe/rxe_net.c
++++ b/rxe/rxe_net.c
+@@ -190,7 +190,7 @@ static int rxe_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
+ 	skb_queue_tail(&rcv_proc->skbq, skb);
+ 
+ 	if (!work_pending(&rcv_proc->work)) 
+-		queue_work(rcv_proc->wq, &rcv_proc->work);
++		queue_work(rxe_wq, &rcv_proc->work);
+ 
+ 	return 0;
+ 
+diff --git a/rxe/rxe_verbs.h b/rxe/rxe_verbs.h
+index 2c53a85..a19ea6b 100644
+--- a/rxe/rxe_verbs.h
++++ b/rxe/rxe_verbs.h
+@@ -353,7 +353,6 @@ struct rxe_port {
+ struct rxe_dev;
+ struct rcv_proc {
+ 	struct sk_buff_head skbq;
+-	struct workqueue_struct *wq;
+ 	struct work_struct work;
+ 	struct rxe_dev *rxe;
+ };
+diff --git a/rxe/rxe.h b/rxe/rxe.h
+index d33dd6c..f506638 100644
+--- a/rxe/rxe.h
++++ b/rxe/rxe.h
+@@ -100,6 +100,8 @@
+ #define rxe_info_mw(mw, fmt, ...) ibdev_info_ratelimited((mw)->ibmw.device, \
+ 		"mw#%d %s:  " fmt, (mw)->elem.index, __func__, ##__VA_ARGS__)
+ 
++extern struct workqueue_struct *rxe_wq;
++
+ /* responder states */
+ enum resp_states {
+ 	RESPST_NONE,
+diff --git a/rxe/rxe_task.c b/rxe/rxe_task.c
+index b7b4259..4e359b5 100644
+--- a/rxe/rxe_task.c
++++ b/rxe/rxe_task.c
+@@ -6,7 +6,7 @@
+ 
+ #include "rxe.h"
+ 
+-static struct workqueue_struct *rxe_wq;
++struct workqueue_struct *rxe_wq;
+ 
+ int rxe_alloc_wq(void)
+ {
+diff --git a/rxe/rxe.c b/rxe/rxe.c
+index 090f12f..a6b3901 100644
+--- a/rxe/rxe.c
++++ b/rxe/rxe.c
+@@ -26,7 +26,6 @@ void rxe_dealloc(struct ib_device *ib_dev)
+ 		struct rcv_proc *rcv_proc = &rxe->rcv_procs[i];
+ 
+ 		cancel_work_sync(&rcv_proc->work);
+-		destroy_workqueue(rcv_proc->wq);
+ 
+ 		while ((skb = skb_dequeue(&rcv_proc->skbq))) {
+ 			ib_device_put(&rxe->ib_dev);
+@@ -154,10 +153,6 @@ static void rxe_init(struct rxe_dev *rxe)
+ 	for (i = 0; i < RXE_MAX_PROC; i++) {
+ 		struct rcv_proc *rcv_proc = &rxe->rcv_procs[i];
+ 
+-		rcv_proc->wq = alloc_ordered_workqueue("rxe", WQ_UNBOUND);
+-		if (!rcv_proc->wq)
+-			goto err;
+-
+ 		skb_queue_head_init(&rcv_proc->skbq);
+ 		INIT_WORK(&rcv_proc->work, recv_worker);
+ 		rcv_proc->rxe = rxe;
+@@ -174,14 +169,6 @@ static void rxe_init(struct rxe_dev *rxe)
+ 
+ 	mutex_init(&rxe->usdev_lock);
+ 	return;
+-
+-err:
+-	for (i = 0; i < RXE_MAX_PROC; i++) {
+-		struct rcv_proc *rcv_proc = &rxe->rcv_procs[i];
+-
+-		if (rcv_proc->wq)
+-			destroy_workqueue(rcv_proc->wq);
+-	}
+ }
+ 
+ void rxe_set_mtu(struct rxe_dev *rxe, unsigned int ndev_mtu)

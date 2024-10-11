@@ -1,0 +1,54 @@
+From 49ce38604b3aa6b76fde6b739668929721a52b5b Mon Sep 17 00:00:00 2001
+From: Bob Pearson <rpearsonhpe@gmail.com>
+Date: Fri, 14 Jul 2023 12:27:29 -0500
+Subject: [PATCH 17/18] RDMA/rxe: Enable sg code in rxe
+
+Make changes to enable sg code in rxe.
+
+Signed-off-by: Bob Pearson <rpearsonhpe@gmail.com>
+---
+ drivers/infiniband/sw/rxe/rxe.c     | 4 ++--
+ drivers/infiniband/sw/rxe/rxe_req.c | 4 ++--
+ 2 files changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/infiniband/sw/rxe/rxe.c b/drivers/infiniband/sw/rxe/rxe.c
+index 800e8c0d437d..b52dd1704e74 100644
+--- a/drivers/infiniband/sw/rxe/rxe.c
++++ b/drivers/infiniband/sw/rxe/rxe.c
+@@ -14,9 +14,9 @@ MODULE_DESCRIPTION("Soft RDMA transport");
+ MODULE_LICENSE("Dual BSD/GPL");
+ 
+ /* if true allow using fragmented skbs */
+-bool rxe_use_sg;
++bool rxe_use_sg = true;
+ module_param_named(use_sg, rxe_use_sg, bool, 0444);
+-MODULE_PARM_DESC(use_sg, "Support skb frags; default false");
++MODULE_PARM_DESC(use_sg, "Support skb frags; default true");
+ 
+ /* free resources for a rxe device all objects created for this device must
+  * have been destroyed
+diff --git a/drivers/infiniband/sw/rxe/rxe_req.c b/drivers/infiniband/sw/rxe/rxe_req.c
+index 51e627e3d0be..36af200e27a2 100644
+--- a/drivers/infiniband/sw/rxe/rxe_req.c
++++ b/drivers/infiniband/sw/rxe/rxe_req.c
+@@ -565,7 +565,7 @@ static struct sk_buff *rxe_init_req_packet(struct rxe_qp *qp,
+ 	struct sk_buff *skb = NULL;
+ 	struct rxe_av *av;
+ 	struct rxe_ah *ah = NULL;
+-	bool frag = false;
++	bool frag;
+ 	int err;
+ 
+ 	pkt->rxe = rxe;
+@@ -589,7 +589,7 @@ static struct sk_buff *rxe_init_req_packet(struct rxe_qp *qp,
+ 			pkt->pad + RXE_ICRC_SIZE;
+ 
+ 	/* init skb */
+-	skb = rxe_init_packet(qp, av, pkt, NULL);
++	skb = rxe_init_packet(qp, av, pkt, &frag);
+ 	if (unlikely(!skb)) {
+ 		err = -ENOMEM;
+ 		goto err_out;
+-- 
+2.39.2
+

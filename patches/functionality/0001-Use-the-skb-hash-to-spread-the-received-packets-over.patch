@@ -1,0 +1,199 @@
+From 08b22a2f069767eb247a48edad93fef704afb2b5 Mon Sep 17 00:00:00 2001
+From: Frank Zago <frank.zago@hpe.com>
+Date: Mon, 13 Jun 2022 21:59:27 +0000
+Subject: [PATCH] Use the skb hash to spread the received packets over several
+ queues
+
+---
+ rxe.c       | 37 +++++++++++++++++++++++++++++++++++++
+ rxe_net.c   | 49 ++++++++++++++++++++++++++++++++++++-------------
+ rxe_verbs.h | 14 ++++++++++++++
+ 3 files changed, 87 insertions(+), 13 deletions(-)
+
+diff --git a/rxe/rxe.c b/rxe/rxe.c
+index 6078c4b..325fca5 100644
+--- a/rxe/rxe.c
++++ b/rxe/rxe.c
+@@ -19,6 +19,20 @@ MODULE_LICENSE("Dual BSD/GPL");
+ void rxe_dealloc(struct ib_device *ib_dev)
+ {
+ 	struct rxe_dev *rxe = container_of(ib_dev, struct rxe_dev, ib_dev);
++	struct sk_buff *skb;
++	int i;
++
++	for (i = 0; i < RXE_MAX_PROC; i++) {
++		struct rcv_proc *rcv_proc = &rxe->rcv_procs[i];
++
++		cancel_work_sync(&rcv_proc->work);
++		destroy_workqueue(rcv_proc->wq);
++
++		while ((skb = skb_dequeue(&rcv_proc->skbq))) {
++			ib_device_put(&rxe->ib_dev);
++			kfree_skb(skb);
++		}
++	}
+ 
+ 	rxe_pool_cleanup(&rxe->uc_pool);
+ 	rxe_pool_cleanup(&rxe->pd_pool);
+@@ -129,12 +143,26 @@ static void rxe_init_pools(struct rxe_dev *rxe)
+ /* initialize rxe device state */
+ static void rxe_init(struct rxe_dev *rxe)
+ {
++	int i;
++
+ 	/* init default device parameters */
+ 	rxe_init_device_param(rxe);
+ 
+ 	rxe_init_ports(rxe);
+ 	rxe_init_pools(rxe);
+ 
++	for (i = 0; i < RXE_MAX_PROC; i++) {
++		struct rcv_proc *rcv_proc = &rxe->rcv_procs[i];
++
++		rcv_proc->wq = alloc_ordered_workqueue("rxe", WQ_UNBOUND);
++		if (!rcv_proc->wq)
++			goto err;
++
++		skb_queue_head_init(&rcv_proc->skbq);
++		INIT_WORK(&rcv_proc->work, recv_worker);
++		rcv_proc->rxe = rxe;
++	}
++
+ 	/* init pending mmap list */
+ 	spin_lock_init(&rxe->mmap_offset_lock);
+ 	spin_lock_init(&rxe->pending_lock);
+@@ -145,6 +173,15 @@ static void rxe_init(struct rxe_dev *rxe)
+ 	rxe->mcg_tree = RB_ROOT;
+ 
+ 	mutex_init(&rxe->usdev_lock);
++	return;
++
++err:
++	for (i = 0; i < RXE_MAX_PROC; i++) {
++		struct rcv_proc *rcv_proc = &rxe->rcv_procs[i];
++
++		if (rcv_proc->wq)
++			destroy_workqueue(rcv_proc->wq);
++	}
+ }
+ 
+ void rxe_set_mtu(struct rxe_dev *rxe, unsigned int ndev_mtu)
+diff --git a/rxe/rxe_net.c b/rxe/rxe_net.c
+index 11cfd23..187096d 100644
+--- a/rxe/rxe_net.c
++++ b/rxe/rxe_net.c
+@@ -135,25 +135,14 @@ static struct dst_entry *rxe_find_route(struct net_device *ndev,
+ 	return dst;
+ }
+ 
+-static int rxe_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
++static void udp_encap_recv(struct rxe_dev *rxe, struct sk_buff *skb)
+ {
+ 	struct udphdr *udph;
+-	struct rxe_dev *rxe;
+-	struct net_device *ndev = skb->dev;
+ 	struct rxe_pkt_info *pkt = SKB_TO_PKT(skb);
+ 	u8 opcode;
+ 	u8 buf[1];
+ 	u8 *p;
+ 
+-	/* takes a reference on rxe->ib_dev
+-	 * drop when skb is freed
+-	 */
+-	rxe = rxe_get_dev_from_net(ndev);
+-	if (!rxe && is_vlan_dev(ndev))
+-		rxe = rxe_get_dev_from_net(vlan_dev_real_dev(ndev));
+-	if (!rxe)
+-		goto err_drop;
+-
+ 	/* Get bth opcode out of skb, it may be in a fragment */
+ 	p = skb_header_pointer(skb, sizeof(struct udphdr), 1, buf);
+ 	if (!p)
+@@ -183,13 +172,49 @@ static int rxe_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
+ 
+ 	rxe_rcv(skb);
+ 
+-	return 0;
++	return;
+ 
+ err_device_put:
+ 	ib_device_put(&rxe->ib_dev);
+-err_drop:
+ 	kfree_skb(skb);
+ 
++	return;
++}
++
++void recv_worker(struct work_struct *work)
++{
++	struct rcv_proc *rcv_proc =
++		container_of(work, struct rcv_proc, work);
++	struct sk_buff *skb;
++
++	while ((skb = skb_dequeue(&rcv_proc->skbq)))
++		udp_encap_recv(rcv_proc->rxe, skb);
++}
++
++static int rxe_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
++{
++	struct rxe_dev *rxe;
++	struct net_device *ndev = skb->dev;
++	struct rcv_proc *rcv_proc;
++
++	/* takes a reference on rxe->ib_dev
++	 * drop when skb is freed
++	 */
++	rxe = rxe_get_dev_from_net(ndev);
++	if (!rxe && is_vlan_dev(ndev))
++		rxe = rxe_get_dev_from_net(vlan_dev_real_dev(ndev));
++	if (!rxe)
++		goto err_drop;
++
++	rcv_proc = &rxe->rcv_procs[skb_get_hash(skb) & (RXE_MAX_PROC - 1)];
++	skb_queue_tail(&rcv_proc->skbq, skb);
++
++	queue_work(rcv_proc->wq, &rcv_proc->work);
++
++	return 0;
++
++err_drop:
++	kfree_skb(skb);
+ 	return 0;
+ }
+ 
+diff --git a/rxe/rxe_verbs.h b/rxe/rxe_verbs.h
+index 80139bf..ee599d3 100644
+--- a/rxe/rxe_verbs.h
++++ b/rxe/rxe_verbs.h
+@@ -385,6 +385,16 @@ struct rxe_port {
+ 	u32			qp_gsi_index;
+ };
+
++/* Number of parallel workers available for processing. Power of 2. */
++#define RXE_MAX_PROC 8
++struct rxe_dev;
++struct rcv_proc {
++	struct sk_buff_head skbq;
++	struct workqueue_struct *wq;
++	struct work_struct work;
++	struct rxe_dev *rxe;
++};
++
+ struct rxe_dev {
+ 	struct ib_device	ib_dev;
+ 	struct ib_device_attr	attr;
+@@ -418,8 +428,12 @@ struct rxe_dev {
+
+ 	struct rxe_port		port;
+ 	struct crypto_shash	*tfm;
++
++	struct rcv_proc rcv_procs[RXE_MAX_PROC];
+ };
+
++void recv_worker(struct work_struct *work);
++
+ static inline void rxe_counter_inc(struct rxe_dev *rxe, enum rxe_counters index)
+ {
+ 	atomic64_inc(&rxe->stats_counters[index]);
+--
+2.31.1

@@ -1,0 +1,44 @@
+diff --git a/rxe/rxe_verbs.h b/rxe/rxe_verbs.h
+index 4084e76..53d1643 100644
+--- a/rxe/rxe_verbs.h
++++ b/rxe/rxe_verbs.h
+@@ -13,6 +13,13 @@
+ #include "rxe_task.h"
+ #include "rxe_hw_counters.h"
+ 
++// HACK (Defined in rdma_user_rxe.h in linux tree.  Define here for code
++// maintenance
++struct rxe_create_ah_resp {
++	__u32 ah_num;
++	__u32 reserved;
++};
++
+ static inline int pkey_match(u16 key1, u16 key2)
+ {
+ 	return (((key1 & 0x7fff) != 0) &&
+diff --git a/rxe/rxe_verbs.c b/rxe/rxe_verbs.c
+index b09b447..77cd8d5 100644
+--- a/rxe/rxe_verbs.c
++++ b/rxe/rxe_verbs.c
+@@ -716,7 +716,7 @@ static int init_send_wr(struct rxe_qp *qp, struct rxe_send_wr *wr,
+ 
+ 		wr->wr.ud.remote_qpn = ud_wr(ibwr)->remote_qpn;
+ 		wr->wr.ud.remote_qkey = ud_wr(ibwr)->remote_qkey;
+-		wr->wr.ud.ah_num = to_rah(ibah)->ah_num;
++		wr->wr.rdma.reserved = to_rah(ibah)->ah_num;
+ 		if (qp_type(qp) == IB_QPT_GSI)
+ 			wr->wr.ud.pkey_index = ud_wr(ibwr)->pkey_index;
+ 
+diff --git a/rxe/rxe_av.c b/rxe/rxe_av.c
+index 889d7ad..ad290e1 100644
+--- a/rxe/rxe_av.c
++++ b/rxe/rxe_av.c
+@@ -145,7 +145,7 @@ struct rxe_av *rxe_get_av(struct rxe_pkt_info *pkt, struct rxe_ah **ahp)
+ 	if (!pkt->wqe)
+ 		return NULL;
+ 
+-	ah_num = pkt->wqe->wr.wr.ud.ah_num;
++	ah_num = pkt->wqe->wr.wr.rdma.reserved;
+ 	if (ah_num) {
+ 		/* only new user provider or kernel client */
+ 		ah = rxe_pool_get_index(&pkt->rxe->ah_pool, ah_num);

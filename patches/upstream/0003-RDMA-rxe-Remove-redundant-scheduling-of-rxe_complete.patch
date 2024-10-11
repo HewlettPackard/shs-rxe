@@ -1,0 +1,37 @@
+From 42bd5ed9785f6274001391aaca0af6ab24ed808d Mon Sep 17 00:00:00 2001
+From: Bob Pearson <rpearsonhpe@gmail.com>
+Date: Sat, 16 Mar 2024 12:31:51 -0500
+Subject: [PATCH 02/12] RDMA/rxe: Remove redundant scheduling of rxe_completer
+
+In rxe_post_send_kernel() if the qp is in the error state after
+posting the work requests the rxe_completer() task is scheduled.
+
+But, the only way to move the qp into the error state is to call
+rxe_qp_error() which also schedules the rxe_completer() task to drain
+the queues. Calling it a second time has no effect. This commit
+removes the redundant call.
+
+Signed-off-by: Bob Pearson <rpearsonhpe@gmail.com>
+---
+ drivers/infiniband/sw/rxe/rxe_verbs.c | 5 -----
+ 1 file changed, 5 deletions(-)
+
+diff --git a/drivers/infiniband/sw/rxe/rxe_verbs.c b/drivers/infiniband/sw/rxe/rxe_verbs.c
+index a49784e5156c..71b0f834030f 100644
+--- a/drivers/infiniband/sw/rxe/rxe_verbs.c
++++ b/drivers/infiniband/sw/rxe/rxe_verbs.c
+@@ -907,11 +907,6 @@ static int rxe_post_send_kernel(struct rxe_qp *qp,
+ 	if (good)
+ 		rxe_sched_task(&qp->req.task);
+ 
+-	spin_lock_irqsave(&qp->state_lock, flags);
+-	if (qp_state(qp) == IB_QPS_ERR)
+-		rxe_sched_task(&qp->comp.task);
+-	spin_unlock_irqrestore(&qp->state_lock, flags);
+-
+ 	return err;
+ }
+ 
+-- 
+2.40.1
+

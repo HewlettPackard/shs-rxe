@@ -1,0 +1,516 @@
+diff --git a/rxe/rxe_comp.c b/rxe/rxe_comp.c
+index c64d9c6..e38b9ed 100644
+--- a/rxe/rxe_comp.c
++++ b/rxe/rxe_comp.c
+@@ -113,15 +113,16 @@ static enum ib_wc_opcode wr_to_wc_opcode(enum ib_wr_opcode opcode)
+ void retransmit_timer(struct timer_list *t)
+ {
+ 	struct rxe_qp *qp = from_timer(qp, t, retrans_timer);
++	unsigned long flags;
+ 
+ 	rxe_dbg_qp(qp, "retransmit timer fired\n");
+ 
+-	spin_lock_bh(&qp->state_lock);
++	spin_lock_irqsave(&qp->state_lock, flags);
+ 	if (qp->valid) {
+ 		qp->comp.timeout = 1;
+ 		rxe_sched_task(&qp->comp.task);
+ 	}
+-	spin_unlock_bh(&qp->state_lock);
++	spin_unlock_irqrestore(&qp->state_lock, flags);
+ }
+ 
+ void rxe_comp_queue_pkt(struct rxe_qp *qp, struct sk_buff *skb)
+@@ -466,11 +467,12 @@ static void do_complete(struct rxe_qp *qp, struct rxe_send_wqe *wqe)
+ 
+ static void comp_check_sq_drain_done(struct rxe_qp *qp)
+ {
+-	spin_lock_bh(&qp->state_lock);
++	unsigned long flags;
++	spin_lock_irqsave(&qp->state_lock, flags);
+ 	if (unlikely(qp_state(qp) == IB_QPS_SQD)) {
+ 		if (qp->attr.sq_draining && qp->comp.psn == qp->req.psn) {
+ 			qp->attr.sq_draining = 0;
+-			spin_unlock_bh(&qp->state_lock);
++			spin_unlock_irqrestore(&qp->state_lock, flags);
+ 
+ 			if (qp->ibqp.event_handler) {
+ 				struct ib_event ev;
+@@ -484,7 +486,7 @@ static void comp_check_sq_drain_done(struct rxe_qp *qp)
+ 			return;
+ 		}
+ 	}
+-	spin_unlock_bh(&qp->state_lock);
++	spin_unlock_irqrestore(&qp->state_lock, flags);
+ }
+ 
+ static inline enum comp_state complete_ack(struct rxe_qp *qp,
+@@ -621,13 +623,14 @@ static void free_pkt(struct rxe_pkt_info *pkt)
+  */
+ static void reset_retry_timer(struct rxe_qp *qp)
+ {
++	unsigned long flags;
+ 	if (qp_type(qp) == IB_QPT_RC && qp->qp_timeout_jiffies) {
+-		spin_lock_bh(&qp->state_lock);
++		spin_lock_irqsave(&qp->state_lock, flags);
+ 		if (qp_state(qp) >= IB_QPS_RTS &&
+ 		    psn_compare(qp->req.psn, qp->comp.psn) > 0)
+ 			mod_timer(&qp->retrans_timer,
+ 				  jiffies + qp->qp_timeout_jiffies);
+-		spin_unlock_bh(&qp->state_lock);
++		spin_unlock_irqrestore(&qp->state_lock, flags);
+ 	}
+ }
+ 
+@@ -639,18 +642,19 @@ int rxe_completer(struct rxe_qp *qp)
+ 	struct rxe_pkt_info *pkt = NULL;
+ 	enum comp_state state;
+ 	int ret;
++	unsigned long flags;
+ 
+-	spin_lock_bh(&qp->state_lock);
++	spin_lock_irqsave(&qp->state_lock, flags);
+ 	if (!qp->valid || qp_state(qp) == IB_QPS_ERR ||
+ 			  qp_state(qp) == IB_QPS_RESET) {
+ 		bool notify = qp->valid && (qp_state(qp) == IB_QPS_ERR);
+ 
+ 		drain_resp_pkts(qp);
+ 		flush_send_queue(qp, notify);
+-		spin_unlock_bh(&qp->state_lock);
++		spin_unlock_irqrestore(&qp->state_lock, flags);
+ 		goto exit;
+ 	}
+-	spin_unlock_bh(&qp->state_lock);
++	spin_unlock_irqrestore(&qp->state_lock, flags);
+ 
+ 	if (qp->comp.timeout) {
+ 		qp->comp.timeout_retry = 1;
+diff --git a/rxe/rxe_net.c b/rxe/rxe_net.c
+index 067da16..28e89bf 100644
+--- a/rxe/rxe_net.c
++++ b/rxe/rxe_net.c
+@@ -551,15 +551,16 @@ int rxe_xmit_packet(struct rxe_qp *qp, struct rxe_pkt_info *pkt,
+ 	int err;
+ 	int is_request = pkt->mask & RXE_REQ_MASK;
+ 	struct rxe_dev *rxe = to_rdev(qp->ibqp.device);
++	unsigned long flags;
+ 
+-	spin_lock_bh(&qp->state_lock);
++	spin_lock_irqsave(&qp->state_lock, flags);
+ 	if ((is_request && (qp_state(qp) < IB_QPS_RTS)) ||
+ 	    (!is_request && (qp_state(qp) < IB_QPS_RTR))) {
+-		spin_unlock_bh(&qp->state_lock);
++		spin_unlock_irqrestore(&qp->state_lock, flags);
+ 		rxe_dbg_qp(qp, "Packet dropped. QP is not in ready state\n");
+ 		goto drop;
+ 	}
+-	spin_unlock_bh(&qp->state_lock);
++	spin_unlock_irqrestore(&qp->state_lock, flags);
+ 
+ 	rxe_icrc_generate(skb, pkt);
+ 
+diff --git a/rxe/rxe_qp.c b/rxe/rxe_qp.c
+index 245dd36..d61cd62 100644
+--- a/rxe/rxe_qp.c
++++ b/rxe/rxe_qp.c
+@@ -300,6 +300,7 @@ int rxe_qp_from_init(struct rxe_dev *rxe, struct rxe_qp *qp, struct rxe_pd *pd,
+ 	struct rxe_cq *rcq = to_rcq(init->recv_cq);
+ 	struct rxe_cq *scq = to_rcq(init->send_cq);
+ 	struct rxe_srq *srq = init->srq ? to_rsrq(init->srq) : NULL;
++	unsigned long flags;
+ 
+ 	rxe_get(pd);
+ 	rxe_get(rcq);
+@@ -325,10 +326,10 @@ int rxe_qp_from_init(struct rxe_dev *rxe, struct rxe_qp *qp, struct rxe_pd *pd,
+ 	if (err)
+ 		goto err2;
+ 
+-	spin_lock_bh(&qp->state_lock);
++	spin_lock_irqsave(&qp->state_lock, flags);
+ 	qp->attr.qp_state = IB_QPS_RESET;
+ 	qp->valid = 1;
+-	spin_unlock_bh(&qp->state_lock);
++	spin_unlock_irqrestore(&qp->state_lock, flags);
+ 
+ 	return 0;
+ 
+@@ -492,24 +493,28 @@ static void rxe_qp_reset(struct rxe_qp *qp)
+ /* move the qp to the error state */
+ void rxe_qp_error(struct rxe_qp *qp)
+ {
+-	spin_lock_bh(&qp->state_lock);
++	unsigned long flags;
++
++	spin_lock_irqsave(&qp->state_lock, flags);
+ 	qp->attr.qp_state = IB_QPS_ERR;
+ 
+ 	/* drain work and packet queues */
+ 	rxe_sched_task(&qp->resp.task);
+ 	rxe_sched_task(&qp->comp.task);
+ 	rxe_sched_task(&qp->req.task);
+-	spin_unlock_bh(&qp->state_lock);
++	spin_unlock_irqrestore(&qp->state_lock, flags);
+ }
+ 
+ static void rxe_qp_sqd(struct rxe_qp *qp, struct ib_qp_attr *attr,
+ 		       int mask)
+ {
+-	spin_lock_bh(&qp->state_lock);
++	unsigned long flags;
++
++	spin_lock_irqsave(&qp->state_lock, flags);
+ 	qp->attr.sq_draining = 1;
+ 	rxe_sched_task(&qp->comp.task);
+ 	rxe_sched_task(&qp->req.task);
+-	spin_unlock_bh(&qp->state_lock);
++	spin_unlock_irqrestore(&qp->state_lock, flags);
+ }
+ 
+ /* caller should hold qp->state_lock */
+@@ -550,19 +555,20 @@ int rxe_qp_from_attr(struct rxe_qp *qp, struct ib_qp_attr *attr, int mask,
+ 		     struct ib_udata *udata)
+ {
+ 	int err;
++	unsigned long flags;
+ 
+ 	if (mask & IB_QP_CUR_STATE)
+ 		qp->attr.cur_qp_state = attr->qp_state;
+ 
+ 	if (mask & IB_QP_STATE) {
+-		spin_lock_bh(&qp->state_lock);
++		spin_lock_irqsave(&qp->state_lock, flags);
+ 		err = __qp_chk_state(qp, attr, mask);
+ 		if (!err) {
+ 			qp->attr.qp_state = attr->qp_state;
+ 			rxe_dbg_qp(qp, "state -> %s\n",
+ 					qps2str[attr->qp_state]);
+ 		}
+-		spin_unlock_bh(&qp->state_lock);
++		spin_unlock_irqrestore(&qp->state_lock, flags);
+ 
+ 		if (err)
+ 			return err;
+@@ -688,6 +694,8 @@ int rxe_qp_from_attr(struct rxe_qp *qp, struct ib_qp_attr *attr, int mask,
+ /* called by the query qp verb */
+ int rxe_qp_to_attr(struct rxe_qp *qp, struct ib_qp_attr *attr, int mask)
+ {
++	unsigned long flags;
++
+ 	*attr = qp->attr;
+ 
+ 	attr->rq_psn				= qp->resp.psn;
+@@ -708,12 +716,12 @@ int rxe_qp_to_attr(struct rxe_qp *qp, struct ib_qp_attr *attr, int mask)
+ 	/* Applications that get this state typically spin on it.
+ 	 * Yield the processor
+ 	 */
+-	spin_lock_bh(&qp->state_lock);
++	spin_lock_irqsave(&qp->state_lock, flags);
+ 	if (qp->attr.sq_draining) {
+-		spin_unlock_bh(&qp->state_lock);
++		spin_unlock_irqrestore(&qp->state_lock, flags);
+ 		cond_resched();
+ 	} else {
+-		spin_unlock_bh(&qp->state_lock);
++		spin_unlock_irqrestore(&qp->state_lock, flags);
+ 	}
+ 
+ 	return 0;
+@@ -737,10 +745,11 @@ int rxe_qp_chk_destroy(struct rxe_qp *qp)
+ static void rxe_qp_do_cleanup(struct work_struct *work)
+ {
+ 	struct rxe_qp *qp = container_of(work, typeof(*qp), cleanup_work.work);
++	unsigned long flags;
+ 
+-	spin_lock_bh(&qp->state_lock);
++	spin_lock_irqsave(&qp->state_lock, flags);
+ 	qp->valid = 0;
+-	spin_unlock_bh(&qp->state_lock);
++	spin_unlock_irqrestore(&qp->state_lock, flags);
+ 	qp->qp_timeout_jiffies = 0;
+ 
+ 	if (qp_type(qp) == IB_QPT_RC) {
+diff --git a/rxe/rxe_recv.c b/rxe/rxe_recv.c
+index 2f953cc..5861e42 100644
+--- a/rxe/rxe_recv.c
++++ b/rxe/rxe_recv.c
+@@ -14,6 +14,7 @@ static int check_type_state(struct rxe_dev *rxe, struct rxe_pkt_info *pkt,
+ 			    struct rxe_qp *qp)
+ {
+ 	unsigned int pkt_type;
++	unsigned long flags;
+ 
+ 	if (unlikely(!qp->valid))
+ 		return -EINVAL;
+@@ -38,19 +39,19 @@ static int check_type_state(struct rxe_dev *rxe, struct rxe_pkt_info *pkt,
+ 		return -EINVAL;
+ 	}
+ 
+-	spin_lock_bh(&qp->state_lock);
++	spin_lock_irqsave(&qp->state_lock, flags);
+ 	if (pkt->mask & RXE_REQ_MASK) {
+ 		if (unlikely(qp_state(qp) < IB_QPS_RTR)) {
+-			spin_unlock_bh(&qp->state_lock);
++			spin_unlock_irqrestore(&qp->state_lock, flags);
+ 			return -EINVAL;
+ 		}
+ 	} else {
+ 		if (unlikely(qp_state(qp) < IB_QPS_RTS)) {
+-			spin_unlock_bh(&qp->state_lock);
++			spin_unlock_irqrestore(&qp->state_lock, flags);
+ 			return -EINVAL;
+ 		}
+ 	}
+-	spin_unlock_bh(&qp->state_lock);
++	spin_unlock_irqrestore(&qp->state_lock, flags);
+ 
+ 	return 0;
+ }
+diff --git a/rxe/rxe_req.c b/rxe/rxe_req.c
+index 2512990..ce3e797 100644
+--- a/rxe/rxe_req.c
++++ b/rxe/rxe_req.c
+@@ -104,17 +104,18 @@ static void req_retry(struct rxe_qp *qp)
+ void rnr_nak_timer(struct timer_list *t)
+ {
+ 	struct rxe_qp *qp = from_timer(qp, t, rnr_nak_timer);
++	unsigned long flags;
+ 
+ 	rxe_dbg_qp(qp, "nak timer fired\n");
+ 
+-	spin_lock_bh(&qp->state_lock);
++	spin_lock_irqsave(&qp->state_lock, flags);
+ 	if (qp->valid) {
+ 		/* request a send queue retry */
+ 		qp->req.need_retry = 1;
+ 		qp->req.wait_for_rnr_timer = 0;
+ 		rxe_sched_task(&qp->req.task);
+ 	}
+-	spin_unlock_bh(&qp->state_lock);
++	spin_unlock_irqrestore(&qp->state_lock, flags);
+ }
+ 
+ static void req_check_sq_drain_done(struct rxe_qp *qp)
+@@ -123,8 +124,9 @@ static void req_check_sq_drain_done(struct rxe_qp *qp)
+ 	unsigned int index;
+ 	unsigned int cons;
+ 	struct rxe_send_wqe *wqe;
++	unsigned long flags;
+ 
+-	spin_lock_bh(&qp->state_lock);
++	spin_lock_irqsave(&qp->state_lock, flags);
+ 	if (qp_state(qp) == IB_QPS_SQD) {
+ 		q = qp->sq.queue;
+ 		index = qp->req.wqe_index;
+@@ -145,7 +147,7 @@ static void req_check_sq_drain_done(struct rxe_qp *qp)
+ 				break;
+ 
+ 			qp->attr.sq_draining = 0;
+-			spin_unlock_bh(&qp->state_lock);
++			spin_unlock_irqrestore(&qp->state_lock, flags);
+ 
+ 			if (qp->ibqp.event_handler) {
+ 				struct ib_event ev;
+@@ -159,7 +161,7 @@ static void req_check_sq_drain_done(struct rxe_qp *qp)
+ 			return;
+ 		} while (0);
+ 	}
+-	spin_unlock_bh(&qp->state_lock);
++	spin_unlock_irqrestore(&qp->state_lock, flags);
+ }
+ 
+ static struct rxe_send_wqe *__req_next_wqe(struct rxe_qp *qp)
+@@ -178,6 +180,7 @@ static struct rxe_send_wqe *__req_next_wqe(struct rxe_qp *qp)
+ static struct rxe_send_wqe *req_next_wqe(struct rxe_qp *qp)
+ {
+ 	struct rxe_send_wqe *wqe;
++	unsigned long flags;
+ 
+ 	req_check_sq_drain_done(qp);
+ 
+@@ -185,13 +188,13 @@ static struct rxe_send_wqe *req_next_wqe(struct rxe_qp *qp)
+ 	if (wqe == NULL)
+ 		return NULL;
+ 
+-	spin_lock_bh(&qp->state_lock);
++	spin_lock_irqsave(&qp->state_lock, flags);
+ 	if (unlikely((qp_state(qp) == IB_QPS_SQD) &&
+ 		     (wqe->state != wqe_state_processing))) {
+-		spin_unlock_bh(&qp->state_lock);
++		spin_unlock_irqrestore(&qp->state_lock, flags);
+ 		return NULL;
+ 	}
+-	spin_unlock_bh(&qp->state_lock);
++	spin_unlock_irqrestore(&qp->state_lock, flags);
+ 
+ 	wqe->mask = wr_opcode_mask(wqe->wr.opcode, qp);
+ 	return wqe;
+@@ -661,16 +664,17 @@ int rxe_requester(struct rxe_qp *qp)
+ 	struct rxe_queue *q = qp->sq.queue;
+ 	struct rxe_ah *ah;
+ 	struct rxe_av *av;
++	unsigned long flags;
+ 
+-	spin_lock_bh(&qp->state_lock);
++	spin_lock_irqsave(&qp->state_lock, flags);
+ 	if (unlikely(!qp->valid)) {
+-		spin_unlock_bh(&qp->state_lock);
++		spin_unlock_irqrestore(&qp->state_lock, flags);
+ 		goto exit;
+ 	}
+ 
+ 	if (unlikely(qp_state(qp) == IB_QPS_ERR)) {
+ 		wqe = __req_next_wqe(qp);
+-		spin_unlock_bh(&qp->state_lock);
++		spin_unlock_irqrestore(&qp->state_lock, flags);
+ 		if (wqe)
+ 			goto err;
+ 		else
+@@ -685,10 +689,10 @@ int rxe_requester(struct rxe_qp *qp)
+ 		qp->req.wait_psn = 0;
+ 		qp->req.need_retry = 0;
+ 		qp->req.wait_for_rnr_timer = 0;
+-		spin_unlock_bh(&qp->state_lock);
++		spin_unlock_irqrestore(&qp->state_lock, flags);
+ 		goto exit;
+ 	}
+-	spin_unlock_bh(&qp->state_lock);
++	spin_unlock_irqrestore(&qp->state_lock, flags);
+ 
+ 	/* we come here if the retransmit timer has fired
+ 	 * or if the rnr timer has fired. If the retransmit
+diff --git a/rxe/rxe_resp.c b/rxe/rxe_resp.c
+index 136ba30..7d79163 100644
+--- a/rxe/rxe_resp.c
++++ b/rxe/rxe_resp.c
+@@ -959,6 +959,7 @@ static enum resp_states do_complete(struct rxe_qp *qp,
+ 	struct ib_uverbs_wc *uwc = &cqe.uibwc;
+ 	struct rxe_recv_wqe *wqe = qp->resp.wqe;
+ 	struct rxe_dev *rxe = to_rdev(qp->ibqp.device);
++	unsigned long flags;
+ 
+ 	if (!wqe)
+ 		goto finish;
+@@ -1049,12 +1050,12 @@ static enum resp_states do_complete(struct rxe_qp *qp,
+ 		return RESPST_ERR_CQ_OVERFLOW;
+ 
+ finish:
+-	spin_lock_bh(&qp->state_lock);
++	spin_lock_irqsave(&qp->state_lock, flags);
+ 	if (unlikely(qp_state(qp) == IB_QPS_ERR)) {
+-		spin_unlock_bh(&qp->state_lock);
++		spin_unlock_irqrestore(&qp->state_lock, flags);
+ 		return RESPST_CHK_RESOURCE;
+ 	}
+-	spin_unlock_bh(&qp->state_lock);
++	spin_unlock_irqrestore(&qp->state_lock, flags);
+ 
+ 	if (unlikely(!pkt))
+ 		return RESPST_DONE;
+@@ -1364,18 +1365,19 @@ int rxe_responder(struct rxe_qp *qp)
+ 	enum resp_states state;
+ 	struct rxe_pkt_info *pkt = NULL;
+ 	int ret;
++	unsigned long flags;
+ 
+-	spin_lock_bh(&qp->state_lock);
++	spin_lock_irqsave(&qp->state_lock, flags);
+ 	if (!qp->valid || qp_state(qp) == IB_QPS_ERR ||
+ 			  qp_state(qp) == IB_QPS_RESET) {
+ 		bool notify = qp->valid && (qp_state(qp) == IB_QPS_ERR);
+ 
+ 		drain_req_pkts(qp);
+ 		flush_recv_queue(qp, notify);
+-		spin_unlock_bh(&qp->state_lock);
++		spin_unlock_irqrestore(&qp->state_lock, flags);
+ 		goto exit;
+ 	}
+-	spin_unlock_bh(&qp->state_lock);
++	spin_unlock_irqrestore(&qp->state_lock, flags);
+ 
+ 	qp->resp.aeth_syndrome = AETH_ACK_UNLIMITED;
+ 
+diff --git a/rxe/rxe_verbs.c b/rxe/rxe_verbs.c
+index 906f28b..424b576 100644
+--- a/rxe/rxe_verbs.c
++++ b/rxe/rxe_verbs.c
+@@ -897,10 +897,10 @@ static int rxe_post_send_kernel(struct rxe_qp *qp,
+ 	if (!err)
+ 		rxe_sched_task(&qp->req.task);
+ 
+-	spin_lock_bh(&qp->state_lock);
++	spin_lock_irqsave(&qp->state_lock, flags);
+ 	if (qp_state(qp) == IB_QPS_ERR)
+ 		rxe_sched_task(&qp->comp.task);
+-	spin_unlock_bh(&qp->state_lock);
++	spin_unlock_irqrestore(&qp->state_lock, flags);
+ 
+ 	return err;
+ }
+@@ -910,22 +910,23 @@ static int rxe_post_send(struct ib_qp *ibqp, const struct ib_send_wr *wr,
+ {
+ 	struct rxe_qp *qp = to_rqp(ibqp);
+ 	int err;
++	unsigned long flags;
+ 
+-	spin_lock_bh(&qp->state_lock);
++	spin_lock_irqsave(&qp->state_lock, flags);
+ 	/* caller has already called destroy_qp */
+ 	if (WARN_ON_ONCE(!qp->valid)) {
+-		spin_unlock_bh(&qp->state_lock);
++		spin_unlock_irqrestore(&qp->state_lock, flags);
+ 		rxe_err_qp(qp, "qp has been destroyed");
+ 		return -EINVAL;
+ 	}
+ 
+ 	if (unlikely(qp_state(qp) < IB_QPS_RTS)) {
+-		spin_unlock_bh(&qp->state_lock);
++		spin_unlock_irqrestore(&qp->state_lock, flags);
+ 		*bad_wr = wr;
+ 		rxe_err_qp(qp, "qp not ready to send");
+ 		return -EINVAL;
+ 	}
+-	spin_unlock_bh(&qp->state_lock);
++	spin_unlock_irqrestore(&qp->state_lock, flags);
+ 
+ 	if (qp->is_user) {
+ 		rxe_sched_task(&qp->req.task);
+@@ -1000,22 +1001,22 @@ static int rxe_post_recv(struct ib_qp *ibqp, const struct ib_recv_wr *wr,
+ 	struct rxe_rq *rq = &qp->rq;
+ 	unsigned long flags;
+ 
+-	spin_lock_bh(&qp->state_lock);
++	spin_lock_irqsave(&qp->state_lock, flags);
+ 	/* caller has already called destroy_qp */
+ 	if (WARN_ON_ONCE(!qp->valid)) {
+-		spin_unlock_bh(&qp->state_lock);
++		spin_unlock_irqrestore(&qp->state_lock, flags);
+ 		rxe_err_qp(qp, "qp has been destroyed");
+ 		return -EINVAL;
+ 	}
+ 
+ 	/* see C10-97.2.1 */
+ 	if (unlikely((qp_state(qp) < IB_QPS_INIT))) {
+-		spin_unlock_bh(&qp->state_lock);
++		spin_unlock_irqrestore(&qp->state_lock, flags);
+ 		*bad_wr = wr;
+ 		rxe_dbg_qp(qp, "qp not ready to post recv");
+ 		return -EINVAL;
+ 	}
+-	spin_unlock_bh(&qp->state_lock);
++	spin_unlock_irqrestore(&qp->state_lock, flags);
+ 
+ 	if (unlikely(qp->srq)) {
+ 		*bad_wr = wr;
+@@ -1036,10 +1037,10 @@ static int rxe_post_recv(struct ib_qp *ibqp, const struct ib_recv_wr *wr,
+ 
+ 	spin_unlock_irqrestore(&rq->producer_lock, flags);
+ 
+-	spin_lock_bh(&qp->state_lock);
++	spin_lock_irqsave(&qp->state_lock, flags);
+ 	if (qp_state(qp) == IB_QPS_ERR)
+ 		rxe_sched_task(&qp->resp.task);
+-	spin_unlock_bh(&qp->state_lock);
++	spin_unlock_irqrestore(&qp->state_lock, flags);
+ 
+ 	return err;
+ }

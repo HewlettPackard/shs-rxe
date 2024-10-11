@@ -1,0 +1,91 @@
+Replace calls to rxe_run_task() with rxe_sched_task().
+This prevents the tasks from all running on the same cpu.
+
+This change slightly reduces performance for single qp send and write
+benchmarks in loopback mode but greatly improves the performance
+with multiple qps because if run task is used all the work tends
+to be performed on one cpu. For actual on the wire benchmarks there
+is no noticeable performance change.
+
+Signed-off-by: Bob Pearson <rpearsonhpe@gmail.com>
+---
+ drivers/infiniband/sw/rxe/rxe_comp.c  | 13 ++-----------
+ drivers/infiniband/sw/rxe/rxe_resp.c  | 12 +-----------
+ drivers/infiniband/sw/rxe/rxe_verbs.c |  2 +-
+ 3 files changed, 4 insertions(+), 23 deletions(-)
+
+diff --git a/drivers/infiniband/sw/rxe/rxe_comp.c b/drivers/infiniband/sw/rxe/rxe_comp.c
+index c41743fbd5f1..26c06f840184 100644
+--- a/drivers/infiniband/sw/rxe/rxe_comp.c
++++ b/drivers/infiniband/sw/rxe/rxe_comp.c
+@@ -131,18 +131,8 @@ void retransmit_timer(struct timer_list *t)
+
+ void rxe_comp_queue_pkt(struct rxe_qp *qp, struct sk_buff *skb)
+ {
+-	int must_sched;
+-
+-	must_sched = skb_queue_len(&qp->resp_pkts) > 0;
+-	if (must_sched != 0)
+-		rxe_counter_inc(SKB_TO_PKT(skb)->rxe, RXE_CNT_SENDER_SCHED);
+-
+	skb_queue_tail(&qp->resp_pkts, skb);
+-
+-	if (must_sched)
+-		rxe_sched_task(&qp->send_task);
+-	else
+-		rxe_run_task(&qp->send_task);
++	rxe_sched_task(&qp->send_task);
+ }
+
+ static inline enum comp_state get_wqe(struct rxe_qp *qp,
+diff --git a/drivers/infiniband/sw/rxe/rxe_resp.c b/drivers/infiniband/sw/rxe/rxe_resp.c
+index 3ce7a32b5dcf..c6a7fa3054fa 100644
+--- a/drivers/infiniband/sw/rxe/rxe_resp.c
++++ b/drivers/infiniband/sw/rxe/rxe_resp.c
+@@ -49,18 +49,8 @@ static char *resp_state_name[] = {
+ /* rxe_recv calls here to add a request packet to the input queue */
+ void rxe_resp_queue_pkt(struct rxe_qp *qp, struct sk_buff *skb)
+ {
+-	int must_sched;
+-	struct rxe_pkt_info *pkt = SKB_TO_PKT(skb);
+-
+	skb_queue_tail(&qp->req_pkts, skb);
+-
+-	must_sched = (pkt->opcode == IB_OPCODE_RC_RDMA_READ_REQUEST) ||
+-			(skb_queue_len(&qp->req_pkts) > 1);
+-
+-	if (must_sched)
+-		rxe_sched_task(&qp->recv_task);
+-	else
+-		rxe_run_task(&qp->recv_task);
++	rxe_sched_task(&qp->recv_task);
+ }
+
+ static inline enum resp_states get_req(struct rxe_qp *qp,
+--
+2.43.0
+
+diff --git a/drivers/infiniband/sw/rxe/rxe_hw_counters.c b/drivers/infiniband/sw/rxe/rxe_hw_counters.c
+index fd58ffb..ecb579f 100644
+--- a/drivers/infiniband/sw/rxe/rxe_hw_counters.c
++++ b/drivers/infiniband/sw/rxe/rxe_hw_counters.c
+@@ -14,7 +14,6 @@ static const struct rdma_stat_desc rxe_counter_descs[] = {
+ 	[RXE_CNT_RCV_RNR].name             =  "rcvd_rnr_err",
+ 	[RXE_CNT_SND_RNR].name             =  "send_rnr_err",
+ 	[RXE_CNT_RCV_SEQ_ERR].name         =  "rcvd_seq_err",
+-	[RXE_CNT_SENDER_SCHED].name        =  "ack_deferred",
+ 	[RXE_CNT_RETRY_EXCEEDED].name      =  "retry_exceeded_err",
+ 	[RXE_CNT_RNR_RETRY_EXCEEDED].name  =  "retry_rnr_exceeded_err",
+ 	[RXE_CNT_COMP_RETRY].name          =  "completer_retry_err",
+diff --git a/drivers/infiniband/sw/rxe/rxe_hw_counters.h b/drivers/infiniband/sw/rxe/rxe_hw_counters.h
+index 7e464a3..a0d6e1a 100644
+--- a/drivers/infiniband/sw/rxe/rxe_hw_counters.h
++++ b/drivers/infiniband/sw/rxe/rxe_hw_counters.h
+@@ -18,7 +18,6 @@ enum rxe_counters {
+ 	RXE_CNT_RCV_RNR,
+ 	RXE_CNT_SND_RNR,
+ 	RXE_CNT_RCV_SEQ_ERR,
+-	RXE_CNT_SENDER_SCHED,
+ 	RXE_CNT_RETRY_EXCEEDED,
+ 	RXE_CNT_RNR_RETRY_EXCEEDED,
+ 	RXE_CNT_COMP_RETRY,

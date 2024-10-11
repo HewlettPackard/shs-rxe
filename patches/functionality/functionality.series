@@ -1,0 +1,22 @@
+functionality/NETCASSINI-3738fix.patch -p1
+
+functionality/cray_ver.patch -p 1
+functionality/cnt_tune_dbg.patch -p 4
+functionality/extend_cqe.patch -p 1
+
+functionality/crc_offload.patch -p 1
+functionality/rxe_cassini_roce_seg.patch -p 2
+
+functionality/rxe_cassini_xmit_hard.patch -p1
+
+functionality/0001-Hash-SKBs-to-TXQs-based-on-QPN.patch -p1
+functionality/0001-Rework-rxe_init_packet.patch -p1
+functionality/fix_logging.patch -p1
+
+functionality/0001-Use-the-skb-hash-to-spread-the-received-packets-over.patch -p1
+functionality/0005-Include-CPU-sched-hint-in-RXE-init.patch
+functionality/0006-Set-RXE-CQ-comp_vector.patch
+functionality/0007-Define-QP-task-sched-CPU.patch
+
+functionality/0002-RDMA-rxe-Change-rxe_cleanup-to-void.patch -p1
+functionality/0003-RDMA-rxe-Pass-qp-index-instead-of-qp-to-rxe_destruct.patch -p1

@@ -1,0 +1,53 @@
+From a846ca611ee7281f756cc8d37ec87e365e4db750 Mon Sep 17 00:00:00 2001
+From: Your Name <you@example.com>
+Date: Thu, 21 Jul 2022 21:44:39 +0000
+Subject: [PATCH] Partial revert of portions of xarray change
+
+SLES15 SP4 doesn't support persistence, so we need to revert the 
+portions of the change that relate to that.
+We are not reverting the xarray change overall.
+---
+ rxe/rxe_mr.c | 3 +--
+ 1 file changed, 13 insertion(+), 0 deletions(-)
+
+
+diff --git a/drivers/infiniband/sw/rxe/rxe_mr.c b/drivers/infiniband/sw/rxe/rxe_mr.c
+index 2181165ea40d7..c80458634962c 100644
+--- a/drivers/infiniband/sw/rxe/rxe_mr.c
++++ b/drivers/infiniband/sw/rxe/rxe_mr.c
+@@ -101,6 +101,7 @@ static int rxe_mr_fill_pages_from_sgt(struct rxe_mr *mr, struct sg_table *sgt)
+ 	XA_STATE(xas, &mr->page_list, 0);
+ 	struct sg_page_iter sg_iter;
+ 	struct page *page;
++	bool persistent = !!(mr->access & IB_ACCESS_FLUSH_PERSISTENT);
+ 
+ 	__sg_page_iter_start(&sg_iter, sgt->sgl, sgt->orig_nents, 0);
+ 	if (!__sg_page_iter_next(&sg_iter))
+@@ -112,6 +111,12 @@ static int rxe_mr_fill_pages_from_sgt(struct rxe_mr *mr, struct sg_table *sgt)
+ 		while (true) {
+ 			page = sg_page_iter_page(&sg_iter);
+ 
++			if (persistent && !is_pmem_page(page)) {
++				rxe_dbg_mr(mr, "Page can't be persistent\n");
++				xas_set_err(&xas, -EINVAL);
++				break;
++			}
++
+ 			xas_store(&xas, page);
+ 			if (xas_error(&xas))
+ 				break;
+@@ -214,8 +207,14 @@ static int rxe_set_page(struct ib_mr *ibmr, u64 iova)
+ {
+ 	struct rxe_mr *mr = to_rmr(ibmr);
+ 	struct page *page = virt_to_page(iova & mr->page_mask);
++	bool persistent = !!(mr->access & IB_ACCESS_FLUSH_PERSISTENT);
+ 	int err;
+ 
++	if (persistent && !is_pmem_page(page)) {
++		rxe_dbg_mr(mr, "Page cannot be persistent\n");
++		return -EINVAL;
++	}
++
+ 	if (unlikely(mr->nbuf == mr->num_buf))
+ 		return -ENOMEM;
+ 

@@ -1,0 +1,201 @@
+From 71afe89a61dd3983ec3d10827cdc827880020cc0 Mon Sep 17 00:00:00 2001
+From: Bob Pearson <rpearsonhpe@gmail.com>
+Date: Fri, 16 Jun 2023 12:54:10 -0500
+Subject: [PATCH 01/17] RDMA/rxe: Add pad size to struct rxe_pkt_info
+
+Add the packet pad size to struct rxe_pkt_info and use this to
+simplify references to pad size in the rxe driver.
+
+Signed-off-by: Bob Pearson <rpearsonhpe@gmail.com>
+---
+ drivers/infiniband/sw/rxe/rxe_hdr.h  |  1 +
+ drivers/infiniband/sw/rxe/rxe_icrc.c |  4 ++--
+ drivers/infiniband/sw/rxe/rxe_recv.c |  1 +
+ drivers/infiniband/sw/rxe/rxe_req.c  | 20 ++++++++++----------
+ drivers/infiniband/sw/rxe/rxe_resp.c | 24 +++++++++++-------------
+ 5 files changed, 25 insertions(+), 25 deletions(-)
+
+diff --git a/drivers/infiniband/sw/rxe/rxe_hdr.h b/drivers/infiniband/sw/rxe/rxe_hdr.h
+index 46f82b27fcd2..1dcdb87fa01a 100644
+--- a/drivers/infiniband/sw/rxe/rxe_hdr.h
++++ b/drivers/infiniband/sw/rxe/rxe_hdr.h
+@@ -22,6 +22,7 @@ struct rxe_pkt_info {
+ 	u16			paylen;		/* length of bth - icrc */
+ 	u8			port_num;	/* port pkt received on */
+ 	u8			opcode;		/* bth opcode of packet */
++	u8			pad;		/* pad size of packet */
+ };
+ 
+ /* Macros should be used only for received skb */
+diff --git a/drivers/infiniband/sw/rxe/rxe_icrc.c b/drivers/infiniband/sw/rxe/rxe_icrc.c
+index fdf5f08cd8f1..c9aa0995e900 100644
+--- a/drivers/infiniband/sw/rxe/rxe_icrc.c
++++ b/drivers/infiniband/sw/rxe/rxe_icrc.c
+@@ -148,7 +148,7 @@ int rxe_icrc_check(struct sk_buff *skb, struct rxe_pkt_info *pkt)
+ 
+ 	icrc = rxe_icrc_hdr(skb, pkt);
+ 	icrc = rxe_crc32(pkt->rxe, icrc, (u8 *)payload_addr(pkt),
+-				payload_size(pkt) + bth_pad(pkt));
++				payload_size(pkt) + pkt->pad);
+ 	icrc = ~icrc;
+ 
+ 	if (unlikely(icrc != pkt_icrc))
+@@ -170,6 +170,6 @@ void rxe_icrc_generate(struct sk_buff *skb, struct rxe_pkt_info *pkt)
+ 	icrcp = (__be32 *)(pkt->hdr + pkt->paylen - RXE_ICRC_SIZE);
+ 	icrc = rxe_icrc_hdr(skb, pkt);
+ 	icrc = rxe_crc32(pkt->rxe, icrc, (u8 *)payload_addr(pkt),
+-				payload_size(pkt) + bth_pad(pkt));
++				payload_size(pkt) + pkt->pad);
+ 	*icrcp = ~icrc;
+ }
+diff --git a/drivers/infiniband/sw/rxe/rxe_recv.c b/drivers/infiniband/sw/rxe/rxe_recv.c
+index 5861e4244049..f912a913f89a 100644
+--- a/drivers/infiniband/sw/rxe/rxe_recv.c
++++ b/drivers/infiniband/sw/rxe/rxe_recv.c
+@@ -329,6 +329,7 @@ void rxe_rcv(struct sk_buff *skb)
+ 	pkt->psn = bth_psn(pkt);
+ 	pkt->qp = NULL;
+ 	pkt->mask |= rxe_opcode[pkt->opcode].mask;
++	pkt->pad = bth_pad(pkt);
+ 
+ 	if (unlikely(skb->len < header_size(pkt)))
+ 		goto drop;
+diff --git a/drivers/infiniband/sw/rxe/rxe_req.c b/drivers/infiniband/sw/rxe/rxe_req.c
+index 2171f19494bc..c3a2686c3f3b 100644
+--- a/drivers/infiniband/sw/rxe/rxe_req.c
++++ b/drivers/infiniband/sw/rxe/rxe_req.c
+@@ -420,18 +420,17 @@ static struct sk_buff *init_req_packet(struct rxe_qp *qp,
+ 	struct rxe_dev		*rxe = to_rdev(qp->ibqp.device);
+ 	struct sk_buff		*skb;
+ 	struct rxe_send_wr	*ibwr = &wqe->wr;
+-	int			pad = (-payload) & 0x3;
+-	int			paylen;
+ 	int			solicited;
+ 	u32			qp_num;
+ 	int			ack_req;
+ 
+ 	/* length from start of bth to end of icrc */
+-	paylen = rxe_opcode[opcode].length + payload + pad + RXE_ICRC_SIZE;
+-	pkt->paylen = paylen;
++	pkt->pad = (-payload) & 0x3;
++	pkt->paylen = rxe_opcode[opcode].length + payload +
++			pkt->pad + RXE_ICRC_SIZE;
+ 
+ 	/* init skb */
+-	skb = rxe_init_packet(rxe, av, paylen, pkt);
++	skb = rxe_init_packet(rxe, av, pkt->paylen, pkt);
+ 	if (unlikely(!skb))
+ 		return NULL;
+ 
+@@ -450,7 +449,8 @@ static struct sk_buff *init_req_packet(struct rxe_qp *qp,
+ 	if (ack_req)
+ 		qp->req.noack_pkts = 0;
+ 
+-	bth_init(pkt, pkt->opcode, solicited, 0, pad, IB_DEFAULT_PKEY_FULL, qp_num,
++	bth_init(pkt, pkt->opcode, solicited, 0, pkt->pad,
++		 IB_DEFAULT_PKEY_FULL, qp_num,
+ 		 ack_req, pkt->psn);
+ 
+ 	/* init optional headers */
+@@ -499,6 +499,7 @@ static int finish_packet(struct rxe_qp *qp, struct rxe_av *av,
+ 			 struct rxe_send_wqe *wqe, struct rxe_pkt_info *pkt,
+ 			 struct sk_buff *skb, u32 payload)
+ {
++	u8 *pad_addr;
+ 	int err;
+ 
+ 	err = rxe_prepare(av, pkt, skb);
+@@ -520,10 +521,9 @@ static int finish_packet(struct rxe_qp *qp, struct rxe_av *av,
+ 			if (err)
+ 				return err;
+ 		}
+-		if (bth_pad(pkt)) {
+-			u8 *pad = payload_addr(pkt) + payload;
+-
+-			memset(pad, 0, bth_pad(pkt));
++		if (pkt->pad) {
++			pad_addr = payload_addr(pkt) + payload;
++			memset(pad_addr, 0, pkt->pad);
+ 		}
+ 	} else if (pkt->mask & RXE_FLUSH_MASK) {
+ 		/* oA19-2: shall have no payload. */
+diff --git a/drivers/infiniband/sw/rxe/rxe_resp.c b/drivers/infiniband/sw/rxe/rxe_resp.c
+index 64c64f5f36a8..fc2f55329fa2 100644
+--- a/drivers/infiniband/sw/rxe/rxe_resp.c
++++ b/drivers/infiniband/sw/rxe/rxe_resp.c
+@@ -525,7 +525,7 @@ static enum resp_states check_rkey(struct rxe_qp *qp,
+ skip_check_range:
+ 	if (pkt->mask & (RXE_WRITE_MASK | RXE_ATOMIC_WRITE_MASK)) {
+ 		if (resid > mtu) {
+-			if (pktlen != mtu || bth_pad(pkt)) {
++			if (pktlen != mtu || pkt->pad) {
+ 				state = RESPST_ERR_LENGTH;
+ 				goto err;
+ 			}
+@@ -534,7 +534,7 @@ static enum resp_states check_rkey(struct rxe_qp *qp,
+ 				state = RESPST_ERR_LENGTH;
+ 				goto err;
+ 			}
+-			if ((bth_pad(pkt) != (0x3 & (-resid)))) {
++			if ((pkt->pad != (0x3 & (-resid)))) {
+ 				/* This case may not be exactly that
+ 				 * but nothing else fits.
+ 				 */
+@@ -766,27 +766,25 @@ static struct sk_buff *prepare_ack_packet(struct rxe_qp *qp,
+ {
+ 	struct rxe_dev *rxe = to_rdev(qp->ibqp.device);
+ 	struct sk_buff *skb;
+-	int paylen;
+-	int pad;
+ 	int err;
+ 
+ 	/*
+ 	 * allocate packet
+ 	 */
+-	pad = (-payload) & 0x3;
+-	paylen = rxe_opcode[opcode].length + payload + pad + RXE_ICRC_SIZE;
++	ack->pad = (-payload) & 0x3;
++	ack->paylen = rxe_opcode[opcode].length + payload +
++			ack->pad + RXE_ICRC_SIZE;
+ 
+-	skb = rxe_init_packet(rxe, &qp->pri_av, paylen, ack);
++	skb = rxe_init_packet(rxe, &qp->pri_av, ack->paylen, ack);
+ 	if (!skb)
+ 		return NULL;
+ 
+ 	ack->qp = qp;
+ 	ack->opcode = opcode;
+ 	ack->mask = rxe_opcode[opcode].mask;
+-	ack->paylen = paylen;
+ 	ack->psn = psn;
+ 
+-	bth_init(ack, opcode, 0, 0, pad, IB_DEFAULT_PKEY_FULL,
++	bth_init(ack, opcode, 0, 0, ack->pad, IB_DEFAULT_PKEY_FULL,
+ 		 qp->attr.dest_qp_num, 0, psn);
+ 
+ 	if (ack->mask & RXE_AETH_MASK) {
+@@ -874,6 +872,7 @@ static enum resp_states read_reply(struct rxe_qp *qp,
+ 	int err;
+ 	struct resp_res *res = qp->resp.res;
+ 	struct rxe_mr *mr;
++	u8 *pad_addr;
+ 
+ 	if (!res) {
+ 		res = rxe_prepare_res(qp, req_pkt, RXE_READ_MASK);
+@@ -932,10 +931,9 @@ static enum resp_states read_reply(struct rxe_qp *qp,
+ 		goto err_out;
+ 	}
+ 
+-	if (bth_pad(&ack_pkt)) {
+-		u8 *pad = payload_addr(&ack_pkt) + payload;
+-
+-		memset(pad, 0, bth_pad(&ack_pkt));
++	if (ack_pkt.pad) {
++		pad_addr = payload_addr(&ack_pkt) + payload;
++		memset(pad_addr, 0, ack_pkt.pad);
+ 	}
+ 
+ 	/* rxe_xmit_packet always consumes the skb */
+-- 
+2.39.2
+

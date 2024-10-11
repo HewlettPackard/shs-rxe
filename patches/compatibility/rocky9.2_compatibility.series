@@ -1,0 +1,2 @@
+compatibility/rocky9.2/2021-10-12_create_ah_index_73a549321003.patch -p1
+compatibility/rocky9.2/2021-10-12_move_av_from_send_wqe_to_send_wr_cfc0312d9c83.patch -p1

@@ -1,0 +1,26 @@
+From d1b8dec3e131a78ed65dd1223ce18b839408bc91 Mon Sep 17 00:00:00 2001
+From: Ian Ziemba <ian.ziemba@hpe.com>
+Date: Tue, 21 Jun 2022 20:43:35 -0500
+Subject: [PATCH 6/9] Set RXE CQ comp_vector
+
+Signed-off-by: Ian Ziemba <ian.ziemba@hpe.com>
+---
+ rxe/rxe_cq.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/rxe/rxe_cq.c b/rxe/rxe_cq.c
+index a788584..7d36418 100644
+--- a/rxe/rxe_cq.c
++++ b/rxe/rxe_cq.c
+@@ -86,6 +86,8 @@ int rxe_cq_from_init(struct rxe_dev *rxe, struct rxe_cq *cq, int cqe,
+ 
+ 	spin_lock_init(&cq->cq_lock);
+ 	cq->ibcq.cqe = cqe;
++	cq->ibcq.comp_vector = comp_vector;
++
+ 	return 0;
+ }
+ 
+-- 
+2.26.2
+

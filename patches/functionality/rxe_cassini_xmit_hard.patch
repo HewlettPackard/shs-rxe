@@ -1,0 +1,239 @@
+diff --git a/rxe/rxe_loc.h b/rxe/rxe_loc.h
+index 8b8b35b..a115d1d 100644
+--- a/rxe/rxe_loc.h
++++ b/rxe/rxe_loc.h
+@@ -102,7 +102,7 @@ struct sk_buff *rxe_init_packet(struct rxe_dev *rxe, struct rxe_av *av,
+ int rxe_prepare(struct rxe_av *av, struct rxe_pkt_info *pkt,
+ 		struct sk_buff *skb);
+ int rxe_xmit_packet(struct rxe_qp *qp, struct rxe_pkt_info *pkt,
+-		    struct sk_buff *skb);
++		    struct sk_buff *skb, bool xmit_hard);
+ const char *rxe_parent_name(struct rxe_dev *rxe, unsigned int port_num);
+ 
+ /* rxe_qp.c */
+diff --git a/rxe/rxe_net.c b/rxe/rxe_net.c
+index 0a5076b..ba296dc 100644
+--- a/rxe/rxe_net.c
++++ b/rxe/rxe_net.c
+@@ -411,9 +411,68 @@ static void rxe_skb_tx_dtor(struct sk_buff *skb)
+ 	rxe_put(qp);
+ }
+ 
+-static int rxe_send(struct sk_buff *skb, struct rxe_pkt_info *pkt)
++static bool rxe_neigh_valid(struct neighbour *n)
++{
++	if (n->dead)
++		return false;
++
++	if (n->nud_state & NUD_INCOMPLETE ||
++	    n->nud_state & NUD_FAILED ||
++	    n->nud_state & NUD_NONE)
++		return false;
++
++	return true;
++}
++
++struct netdev_queue *rxe_netdev_core_pick_tx(struct net_device *dev,
++					     struct sk_buff *skb,
++					     struct net_device *sb_dev)
++{
++	int queue_index = 0;
++
++#ifdef CONFIG_XPS
++	u32 sender_cpu = skb->sender_cpu - 1;
++
++	if (sender_cpu >= (u32)NR_CPUS)
++		skb->sender_cpu = raw_smp_processor_id() + 1;
++#endif
++
++	if (dev->real_num_tx_queues != 1) {
++		const struct net_device_ops *ops = dev->netdev_ops;
++
++		if (ops->ndo_select_queue)
++			queue_index = ops->ndo_select_queue(dev, skb, sb_dev);
++		else
++			queue_index = netdev_pick_tx(dev, skb, sb_dev);
++
++		queue_index = netdev_cap_txqueue(dev, queue_index);
++	}
++
++	skb_set_queue_mapping(skb, queue_index);
++	return netdev_get_tx_queue(dev, queue_index);
++}
++
++static int rxe_xmit_one(struct sk_buff *skb, struct net_device *dev,
++			struct netdev_queue *txq)
++{
++	if (dev_nit_active(dev))
++		dev_queue_xmit_nit(skb, dev);
++
++	return netdev_start_xmit(skb, dev, txq, false);
++}
++
++static int rxe_send(struct sk_buff *skb, struct rxe_pkt_info *pkt, bool xmit_hard)
+ {
++	struct rxe_dev *rxe = to_rdev(qp->ibqp.device);
+ 	int err;
++	struct netdev_queue *txq;
++	struct net_device *dev = skb->dev;
++	struct ethhdr *eth;
++	struct dst_entry *dst;
++	struct rtable *rt;
++	struct neighbour *neigh;
++	bool is_v6gw;
++	bool packet_requeue;
+ 
+ 	skb->destructor = rxe_skb_tx_dtor;
+ 	skb->sk = pkt->qp->sk->sk;
+@@ -420,10 +480,78 @@ static int rxe_send(struct sk_buff *skb, struct rxe_pkt_info *pkt)
+ 	rxe_get(pkt->qp);
+ 	atomic_inc(&pkt->qp->skb_out);
+ 
+-	if (skb->protocol == htons(ETH_P_IP))
+-		err = ip_local_out(dev_net(skb_dst(skb)->dev), skb->sk, skb);
+-	else
+-		err = ip6_local_out(dev_net(skb_dst(skb)->dev), skb->sk, skb);
++	if (xmit_hard) {
++		eth = __skb_push(skb, ETH_HLEN);
++		skb_reset_mac_header(skb);
++
++		eth->h_proto = skb->protocol;
++		ether_addr_copy(eth->h_source, dev->dev_addr);
++
++		dst = skb_dst(skb);
++		rt = (struct rtable *)dst;
++
++		rcu_read_lock_bh();
++		neigh = ip_neigh_for_gw(rt, skb, &is_v6gw);
++		if (IS_ERR(neigh) || !rxe_neigh_valid(neigh)) {
++			rcu_read_unlock_bh();
++
++			/* Failed to find valid neighbor entry. Pull the
++			 * Ethernet header of the SKB and send the packet
++			 * through the IP stack which will trigger a neighbor
++			 * resolution.
++			 *
++			 * Note: This could possibly lead to out-of-order PSNs.
++			 * Rely on retries to recover.
++			 */
++			__skb_pull(skb, ETH_HLEN);
++			goto ip_out;
++		}
++
++		sock_confirm_neigh(skb, neigh);
++		ether_addr_copy(eth->h_dest, neigh->ha);
++		rcu_read_unlock_bh();
++
++		if (skb->protocol == htons(ETH_P_IP))
++			ip_send_check(ip_hdr(skb));
++
++#ifdef CONFIG_XPS
++		skb->sender_cpu = smp_processor_id();
++#endif
++		__skb_set_sw_hash(skb,
++				  be32_to_cpu(((struct rxe_bth *)pkt->hdr)->qpn),
++				  false);
++
++		txq = rxe_netdev_core_pick_tx(dev, skb, NULL);
++
++		/* SKB chaining is not supported. */
++		BUG_ON(skb->next);
++
++		packet_requeue = false;
++
++		local_bh_disable();
++		HARD_TX_LOCK(dev, txq, smp_processor_id());
++		if (!netif_xmit_frozen_or_stopped(txq)) {
++			err = rxe_xmit_one(skb, skb_dst(skb)->dev, txq);
++			if (!dev_xmit_complete(err)) {
++				rxe_counter_inc(rxe, RXE_CNT_XMIT_HARD_FAIL);
++				packet_requeue = true;
++			}
++		} else {
++			rxe_counter_inc(rxe, RXE_CNT_XMIT_HARD_STALL);
++			packet_requeue = true;
++		}
++		HARD_TX_UNLOCK(dev, txq);
++		local_bh_enable();
++
++		if (packet_requeue)
++			goto ip_out;
++	} else {
++ip_out:
++		if (skb->protocol == htons(ETH_P_IP))
++			err = ip_local_out(dev_net(skb_dst(skb)->dev), skb->sk, skb);
++		else
++			err = ip6_local_out(dev_net(skb_dst(skb)->dev), skb->sk, skb);
++	}
+ 
+	return err;
+ }
+diff --git a/rxe/rxe_req.c b/rxe/rxe_req.c
+index 338915d..13812f3 100644
+--- a/rxe/rxe_req.c
++++ b/rxe/rxe_req.c
+@@ -11,6 +11,11 @@
+ #include "rxe_loc.h"
+ #include "rxe_queue.h"
+ 
++static bool xmit_hard = true;
++module_param(xmit_hard, bool, 0644);
++MODULE_PARM_DESC(xmit_hard,
++                 "Bypass networking stack and queue packet directly to device");
++
+ static int next_opcode(struct rxe_qp *qp, struct rxe_send_wqe *wqe,
+ 		       u32 opcode);
+ 
+@@ -859,7 +859,7 @@ again:
+ 	update_wqe_state(qp, wqe, &pkt);
+ 	update_wqe_psn(qp, wqe, &pkt, payload);
+ 
+-	err = rxe_xmit_packet(qp, &pkt, skb);
++	err = rxe_xmit_packet(qp, &pkt, skb, xmit_hard);
+ 	if (err) {
+ 		qp->need_req_skb = 1;
+ 
+diff --git a/rxe/rxe_resp.c b/rxe/rxe_resp.c
+index 20e3179..0d4a0de 100644
+--- a/rxe/rxe_resp.c
++++ b/rxe/rxe_resp.c
+@@ -836,7 +836,7 @@ static enum resp_states read_reply(struct rxe_qp *qp,
+ 	}
+ 
+ 	/* rxe_xmit_packet always consumes the skb */
+-	err = rxe_xmit_packet(qp, &ack_pkt, skb);
++	err = rxe_xmit_packet(qp, &ack_pkt, skb, false);
+ 	if (err) {
+ 		state = RESPST_ERR_RNR;
+ 		goto err_out;
+@@ -1055,7 +1055,7 @@ static int send_common_ack(struct rxe_qp *qp, u8 syndrome, u32 psn,
+ 	if (!skb)
+ 		return -ENOMEM;
+ 
+-	err = rxe_xmit_packet(qp, &ack_pkt, skb);
++	err = rxe_xmit_packet(qp, &ack_pkt, skb, false);
+ 	if (err)
+ 		rxe_dbg_qp(qp, "Failed sending %s\n", msg);
+ 
+diff --git a/rxe/rxe_net.c b/rxe/rxe_net.c
+index 5371db7..cd3398a 100644
+--- a/rxe/rxe_net.c
++++ b/rxe/rxe_net.c
+@@ -563,7 +563,7 @@ static int rxe_loopback(struct sk_buff *skb, struct rxe_pkt_info *pkt)
+ }
+ 
+ int rxe_xmit_packet(struct rxe_qp *qp, struct rxe_pkt_info *pkt,
+-		    struct sk_buff *skb)
++		    struct sk_buff *skb, bool xmit_hard)
+ {
+ 	int err;
+ 	int is_request = pkt->mask & RXE_REQ_MASK;
+@@ -580,7 +580,7 @@ int rxe_xmit_packet(struct rxe_qp *qp, struct rxe_pkt_info *pkt,
+ 	if (pkt->mask & RXE_LOOPBACK_MASK)
+ 		err = rxe_loopback(skb, pkt);
+ 	else
+-		err = rxe_send(skb, pkt);
++		err = rxe_send(skb, pkt, xmit_hard);
+ 	if (err) {
+ 		rxe_counter_inc(rxe, RXE_CNT_SEND_ERR);
+ 		return err;

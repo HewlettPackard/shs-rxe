@@ -1,0 +1,7 @@
+@Library(['CrayNetworkCI@master']) _
+
+def map = [:]
+map.prScript = "cxi_vm_script.sh"
+map.commitScript = "cxi_vm_script.sh"
+map.primaryBranch = "master"
+cxiVmPipeline (map)

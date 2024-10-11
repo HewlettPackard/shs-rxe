@@ -1,0 +1,13 @@
+diff --git a/drivers/infiniband/sw/rxe/rxe_param.h b/drivers/infiniband/sw/rxe/rxe_param.h
+index bbc88cd71d950..a754fc902e3d1 100644
+--- a/drivers/infiniband/sw/rxe/rxe_param.h
++++ b/drivers/infiniband/sw/rxe/rxe_param.h
+@@ -51,6 +51,8 @@ enum rxe_device_param {
+ 					| IB_DEVICE_SRQ_RESIZE
+ 					| IB_DEVICE_MEM_MGT_EXTENSIONS
+ 					| IB_DEVICE_MEM_WINDOW
++					| IB_DEVICE_FLUSH_GLOBAL
++					| IB_DEVICE_FLUSH_PERSISTENT
+ #ifdef CONFIG_64BIT
+ 					| IB_DEVICE_MEM_WINDOW_TYPE_2B
+ 					| IB_DEVICE_ATOMIC_WRITE,

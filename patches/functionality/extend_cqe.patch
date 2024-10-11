@@ -1,0 +1,13 @@
+diff --git b/rxe/rxe_param.h a/rxe/rxe_param.h
+index 86c7a8b..f9425ab 100644
+--- b/rxe/rxe_param.h
++++ a/rxe/rxe_param.h
+@@ -59,7 +59,7 @@ enum rxe_device_param {
+ 					  sizeof(struct rxe_send_wqe),
+ 	RXE_MAX_SGE_RD			= 32,
+ 	RXE_MAX_CQ			= DEFAULT_MAX_VALUE,
+-	RXE_MAX_LOG_CQE			= 15,
++	RXE_MAX_LOG_CQE			= 19,
+ 	RXE_MAX_PD			= DEFAULT_MAX_VALUE,
+ 	RXE_MAX_QP_RD_ATOM		= 128,
+ 	RXE_MAX_RES_RD_ATOM		= 0x3f000,

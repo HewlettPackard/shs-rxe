@@ -1,0 +1,68 @@
+From ea3b4068ab457be998b24895d5ec71cc8b9613e2 Mon Sep 17 00:00:00 2001
+From: Bob Pearson <rpearsonhpe@gmail.com>
+Date: Fri, 16 Jun 2023 13:12:55 -0500
+Subject: [PATCH 03/17] RDMA/rxe: Isolate request payload code in a subroutine
+
+Isolate the code that fills the payload of a request packet into
+a subroutine named rxe_init_payload().
+
+Signed-off-by: Bob Pearson <rpearsonhpe@gmail.com>
+---
+ drivers/infiniband/sw/rxe/rxe_req.c | 34 +++++++++++++++++------------
+ 1 file changed, 20 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/infiniband/sw/rxe/rxe_req.c b/drivers/infiniband/sw/rxe/rxe_req.c
+index b976e2127626..95f08af37261 100644
+--- a/drivers/infiniband/sw/rxe/rxe_req.c
++++ b/drivers/infiniband/sw/rxe/rxe_req.c
+@@ -477,6 +477,25 @@ static void rxe_init_roce_hdrs(struct rxe_qp *qp, struct rxe_send_wqe *wqe,
+ 	}
+ }
+ 
++static int rxe_init_payload(struct rxe_qp *qp, struct rxe_send_wqe *wqe,
++			    struct rxe_pkt_info *pkt, u32 payload)
++{
++	void *data;
++	int err = 0;
++
++	if (wqe->wr.send_flags & IB_SEND_INLINE) {
++		data = &wqe->dma.inline_data[wqe->dma.sge_offset];
++		memcpy(payload_addr(pkt), data, payload);
++		wqe->dma.resid -= payload;
++		wqe->dma.sge_offset += payload;
++	} else {
++		err = copy_data(qp->pd, 0, &wqe->dma, payload_addr(pkt),
++				payload, RXE_FROM_MR_OBJ);
++	}
++
++	return err;
++}
++
+ static struct sk_buff *init_req_packet(struct rxe_qp *qp,
+ 				       struct rxe_av *av,
+ 				       struct rxe_send_wqe *wqe,
+@@ -513,20 +532,7 @@ static int finish_packet(struct rxe_qp *qp, struct rxe_av *av,
+ 		return err;
+ 
+ 	if (pkt->mask & RXE_WRITE_OR_SEND_MASK) {
+-		if (wqe->wr.send_flags & IB_SEND_INLINE) {
+-			u8 *tmp = &wqe->dma.inline_data[wqe->dma.sge_offset];
+-
+-			memcpy(payload_addr(pkt), tmp, payload);
+-
+-			wqe->dma.resid -= payload;
+-			wqe->dma.sge_offset += payload;
+-		} else {
+-			err = copy_data(qp->pd, 0, &wqe->dma,
+-					payload_addr(pkt), payload,
+-					RXE_FROM_MR_OBJ);
+-			if (err)
+-				return err;
+-		}
++		err = rxe_init_payload(qp, wqe, pkt, payload);
+ 		if (pkt->pad) {
+ 			pad_addr = payload_addr(pkt) + payload;
+ 			memset(pad_addr, 0, pkt->pad);
+-- 
+2.39.2
+

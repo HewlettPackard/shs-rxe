@@ -1,0 +1,47 @@
+diff --git a/drivers/infiniband/sw/rxe/rxe_req.c b/drivers/infiniband/sw/rxe/rxe_req.c
+index 4d45f508392fe..2713e90589225 100644
+--- a/drivers/infiniband/sw/rxe/rxe_req.c
++++ b/drivers/infiniband/sw/rxe/rxe_req.c
+@@ -258,6 +258,10 @@ static int next_opcode_rc(struct rxe_qp *qp, u32 opcode, int fits)
+ 		else
+ 			return fits ? IB_OPCODE_RC_SEND_ONLY_WITH_INVALIDATE :
+ 				IB_OPCODE_RC_SEND_FIRST;
++
++	case IB_WR_ATOMIC_WRITE:
++		return IB_OPCODE_RC_ATOMIC_WRITE;
++
+ 	case IB_WR_REG_MR:
+ 	case IB_WR_LOCAL_INV:
+ 		return opcode;
+@@ -519,6 +519,11 @@ static int finish_packet(struct rxe_qp *qp, struct rxe_av *av,
+ 		}
+ 	}
+ 
++	if (pkt->mask & RXE_ATOMIC_WRITE_MASK) {
++		memcpy(payload_addr(pkt), wqe->dma.atomic_wr, payload);
++		wqe->dma.resid -= payload;
++	}
++
+ 	/* init pad and icrc */
+ 	err = rxe_prepare_pad_icrc(pkt, skb, payload, frag);
+ 	if (unlikely(err)) {
+@@ -709,15 +718,17 @@ int rxe_requester(void *arg)
+ 	}
+ 
+ 	mask = rxe_opcode[opcode].mask;
+-	if (unlikely(mask & RXE_READ_OR_ATOMIC_MASK)) {
++	if (unlikely(mask & (RXE_READ_OR_ATOMIC_MASK |
++			RXE_ATOMIC_WRITE_MASK))) {
+ 		if (check_init_depth(qp, wqe)) {
+			rxe_counter_inc(rxe, RXE_CNT_WAIT_DEPTH);
+ 			goto exit;
+		}
+ 	}
+ 
+ 	mtu = get_mtu(qp);
+-	payload = (mask & RXE_WRITE_OR_SEND_MASK) ? wqe->dma.resid : 0;
++	payload = (mask & (RXE_WRITE_OR_SEND_MASK | RXE_ATOMIC_WRITE_MASK)) ?
++			wqe->dma.resid : 0;
+ 	if (payload > mtu) {
+ 		if (unlikely(qp_type(qp) == IB_QPT_UD)) {
+ 			fake_udp_send(qp, wqe);

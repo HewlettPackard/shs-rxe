@@ -1,0 +1,13 @@
+diff --git a/rxe/rxe_net.c b/rxe/rxe_net.c
+index 576169a..3733e1c 100644
+--- a/rxe/rxe_net.c
++++ b/rxe/rxe_net.c
+@@ -752,7 +752,7 @@ struct sk_buff *rxe_init_packet(struct rxe_qp *qp, struct rxe_av *av,
+ 	const struct ib_gid_attr *attr;
+ 	int skb_size;
+ 
+-	attr = rdma_get_gid_attr(&rxe->ib_dev, port_num, av->grh.sgid_index);
++	attr = rdma_get_gid_attr(&rxe->ib_dev, av->port_num, av->grh.sgid_index);
+ 	if (IS_ERR(attr))
+ 		return NULL;
+ 

@@ -1,0 +1,7 @@
+/rxe
+/rxe/*
+/.pc
+patches/SLES*.series
+patches/ROCKY*.series
+patches/RHEL*.series
+cray-rxe-driver*.tar.gz

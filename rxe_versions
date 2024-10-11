@@ -1,0 +1,8 @@
+Requires: rdma-core < 56mlnx40-1
+
+%if 0%{?rhel}
+Requires:       kmod-cray-cxi-driver
+%else
+Requires:       cray-cxi-driver-kmp-%1
+%endif
+

@@ -1,0 +1,24 @@
+diff --git a/drivers/infiniband/sw/rxe/rxe_net.c b/drivers/infiniband/sw/rxe/rxe_net.c
+index 2bc7361152ea..26b90b8607ef 100644
+--- a/drivers/infiniband/sw/rxe/rxe_net.c
++++ b/drivers/infiniband/sw/rxe/rxe_net.c
+@@ -159,6 +159,9 @@ static int rxe_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
+ 	pkt->mask = RXE_GRH_MASK;
+ 	pkt->paylen = be16_to_cpu(udph->len) - sizeof(*udph);
+ 
++	/* remove udp header */
++	skb_pull(skb, sizeof(struct udphdr));
++
+ 	rxe_rcv(skb);
+ 
+ 	return 0;
+@@ -401,6 +404,9 @@ static int rxe_loopback(struct sk_buff *skb, struct rxe_pkt_info *pkt)
+ 		return -EIO;
+ 	}
+ 
++	/* remove udp header */
++	skb_pull(skb, sizeof(struct udphdr));
++
+ 	rxe_rcv(skb);
+ 
+ 	return 0;

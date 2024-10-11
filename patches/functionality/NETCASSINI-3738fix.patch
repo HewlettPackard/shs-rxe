@@ -1,0 +1,53 @@
+diff --git a/rxe/rxe_comp.c b/rxe/rxe_comp.c
+index 9764941..e8dc9d8 100644
+--- a/rxe/rxe_comp.c
++++ b/rxe/rxe_comp.c
+@@ -565,6 +565,17 @@ static int flush_send_wqe(struct rxe_qp *qp, struct rxe_send_wqe *wqe)
+ 	struct ib_uverbs_wc *uwc = &cqe.uibwc;
+ 	int err;
+ 
++	if (unlikely(wqe->mask & WR_LOCAL_OP_MASK)) {
++		struct rxe_dev *rxe = to_rdev(qp->ibqp.device);
++		struct rxe_mr *mr;
++		u32 rkey;
++		rkey = (wqe->wr.opcode == IB_WR_LOCAL_INV ? wqe->wr.ex.invalidate_rkey : wqe->wr.wr.reg.key);
++		mr = rxe_pool_get_index(&rxe->mr_pool, rkey >> 8);
++		if (mr) {
++			mr->state = RXE_MR_STATE_FREE;
++			rxe_put(mr);
++		}
++	}
+ 	if (qp->is_user) {
+ 		uwc->wr_id = wqe->wr.wr_id;
+ 		uwc->status = IB_WC_WR_FLUSH_ERR;
+diff --git a/rxe/rxe_mr.c b/rxe/rxe_mr.c
+index 0e538fa..c9313e0 100644
+--- a/rxe/rxe_mr.c
++++ b/rxe/rxe_mr.c
+@@ -653,13 +653,26 @@ int rxe_invalidate_mr(struct rxe_qp *qp, u32 key)
+ 		goto err;
+ 	}
+ 
++	/* Repeated invocation may be caused by flush
++	 * The mr is ready for re-register, so this is a no work case
++	 */
++	if (mr->state == RXE_MR_STATE_FREE)
++		goto skip_key_check;
++
+ 	if (mr->rkey ? (key != mr->rkey) : (key != mr->lkey)) {
++		/* There are some cases where a fast reg may not have
++		 * created a wqe to be purged during queue reset.  In this
++		 * case, the key can be off by one.  Allow the case.
++		 */
++		if (mr->rkey ? (key == (mr->rkey + 1)) : (key == (mr->lkey + 1)))
++			goto skip_key_check;
+ 		rxe_dbg_mr(mr, "wr key (%#x) doesn't match mr key (%#x)\n",
+ 			key, (mr->rkey ? mr->rkey : mr->lkey));
+ 		ret = -EINVAL;
+ 		goto err_drop_ref;
+ 	}
+ 
++skip_key_check:
+ 	if (atomic_read(&mr->num_mw) > 0) {
+ 		rxe_dbg_mr(mr, "Attempt to invalidate an MR while bound to MWs\n");
+ 		ret = -EINVAL;

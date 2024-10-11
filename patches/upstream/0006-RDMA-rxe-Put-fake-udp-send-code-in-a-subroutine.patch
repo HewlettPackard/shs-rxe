@@ -1,0 +1,71 @@
+From 43dc668fc5bfba4ea617126a249fc551d4bea251 Mon Sep 17 00:00:00 2001
+From: Bob Pearson <rpearsonhpe@gmail.com>
+Date: Thu, 16 Mar 2023 13:04:28 -0500
+Subject: [PATCH 06/17] RDMA/rxe: Put fake udp send code in a subroutine
+
+Isolate the code that handles the case of an overlong to a
+subroutine named fake_udp_send().
+
+Signed-off-by: Bob Pearson <rpearsonhpe@gmail.com>
+---
+ drivers/infiniband/sw/rxe/rxe_req.c | 37 ++++++++++++++++-------------
+ 1 file changed, 20 insertions(+), 17 deletions(-)
+
+diff --git a/drivers/infiniband/sw/rxe/rxe_req.c b/drivers/infiniband/sw/rxe/rxe_req.c
+index 51ec01daf27f..2ca32fe2f8ed 100644
+--- a/drivers/infiniband/sw/rxe/rxe_req.c
++++ b/drivers/infiniband/sw/rxe/rxe_req.c
+@@ -705,6 +705,24 @@ static int rxe_do_local_ops(struct rxe_qp *qp, struct rxe_send_wqe *wqe)
+ 	return 0;
+ }
+ 
++/* C10-93.1.1: If the total sum of all the buffer lengths specified for a
++ * UD message exceeds the MTU of the port as returned by QueryHCA, the CI
++ * shall not emit any packets for this message. Further, the CI shall not
++ * generate an error due to this condition.
++ */
++static void fake_udp_send(struct rxe_qp *qp, struct rxe_send_wqe *wqe)
++{
++	wqe->first_psn = qp->req.psn;
++	wqe->last_psn = qp->req.psn;
++	qp->req.psn = (qp->req.psn + 1) & BTH_PSN_MASK;
++	qp->req.opcode = IB_OPCODE_UD_SEND_ONLY;
++	qp->req.wqe_index = queue_next_index(qp->sq.queue,
++				       qp->req.wqe_index);
++	wqe->state = wqe_state_done;
++	wqe->status = IB_WC_SUCCESS;
++	rxe_run_task(&qp->comp.task);
++}
++
+ int rxe_requester(struct rxe_qp *qp)
+ {
+ 	struct rxe_pkt_info pkt;
+@@ -808,23 +826,8 @@ int rxe_requester(struct rxe_qp *qp)
+ 	payload = (mask & (RXE_WRITE_OR_SEND_MASK | RXE_ATOMIC_WRITE_MASK)) ?
+ 			wqe->dma.resid : 0;
+ 	if (payload > mtu) {
+-		if (qp_type(qp) == IB_QPT_UD) {
+-			/* C10-93.1.1: If the total sum of all the buffer lengths specified for a
+-			 * UD message exceeds the MTU of the port as returned by QueryHCA, the CI
+-			 * shall not emit any packets for this message. Further, the CI shall not
+-			 * generate an error due to this condition.
+-			 */
+-
+-			/* fake a successful UD send */
+-			wqe->first_psn = qp->req.psn;
+-			wqe->last_psn = qp->req.psn;
+-			qp->req.psn = (qp->req.psn + 1) & BTH_PSN_MASK;
+-			qp->req.opcode = IB_OPCODE_UD_SEND_ONLY;
+-			qp->req.wqe_index = queue_next_index(qp->sq.queue,
+-						       qp->req.wqe_index);
+-			wqe->state = wqe_state_done;
+-			wqe->status = IB_WC_SUCCESS;
+-			rxe_sched_task(&qp->comp.task);
++		if (unlikely(qp_type(qp) == IB_QPT_UD)) {
++			fake_udp_send(qp, wqe);
+ 			goto done;
+ 		}
+ 		payload = mtu;
+-- 
+2.39.2
+
