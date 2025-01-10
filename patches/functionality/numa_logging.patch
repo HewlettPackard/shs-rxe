@@ -1,0 +1,89 @@
+diff --git a/rxe/rxe.c b/rxe/rxe.c
+index ea62f8b..c2b2811 100644
+--- a/rxe/rxe.c
++++ b/rxe/rxe.c
+@@ -57,6 +57,10 @@ unsigned long long exclude_numa_mask = 0x0ULL;
+ module_param(exclude_numa_mask, ullong, 0644);
+ MODULE_PARM_DESC(exclude_numa_mask, "Set a bit to stop RXE from using the associated numa group region");
+ 
++bool log_numa = false;
++module_param(log_numa, bool, 0644);
++MODULE_PARM_DESC(log_numa, "When set, counts numa allocations");
++
+ /* free resources for a rxe device all objects created for this device must
+  * have been destroyed
+  */
+diff --git a/rxe/rxe_hw_counters.c b/rxe/rxe_hw_counters.c
+index ecb579f..16e5c1b 100644
+--- a/rxe/rxe_hw_counters.c
++++ b/rxe/rxe_hw_counters.c
+@@ -27,6 +27,14 @@ static const struct rdma_stat_desc rxe_counter_descs[] = {
+ 	[RXE_CNT_WAIT_DEPTH].name	   =  "wait_depth",
+ 	[RXE_CNT_XMIT_HARD_FAIL].name	   =  "xmit_hard_fail",
+ 	[RXE_CNT_XMIT_HARD_STALL].name	   =  "xmit_hard_stall",
++	[RXE_CNT_NUMA0].name		   =  "numa0",
++	[RXE_CNT_NUMA1].name		   =  "numa1",
++	[RXE_CNT_NUMA2].name		   =  "numa2",
++	[RXE_CNT_NUMA3].name		   =  "numa3",
++	[RXE_CNT_NUMA4].name		   =  "numa4",
++	[RXE_CNT_NUMA5].name		   =  "numa5",
++	[RXE_CNT_NUMA6].name		   =  "numa6",
++	[RXE_CNT_NUMA7].name		   =  "numa7",
+ };
+ 
+ int rxe_ib_get_hw_stats(struct ib_device *ibdev,
+diff --git a/rxe/rxe_hw_counters.h b/rxe/rxe_hw_counters.h
+index a0d6e1a..3afedaa 100644
+--- a/rxe/rxe_hw_counters.h
++++ b/rxe/rxe_hw_counters.h
+@@ -31,6 +31,14 @@ enum rxe_counters {
+ 	RXE_CNT_WAIT_DEPTH,
+ 	RXE_CNT_XMIT_HARD_FAIL,
+ 	RXE_CNT_XMIT_HARD_STALL,
++	RXE_CNT_NUMA0,
++	RXE_CNT_NUMA1,
++	RXE_CNT_NUMA2,
++	RXE_CNT_NUMA3,
++	RXE_CNT_NUMA4,
++	RXE_CNT_NUMA5,
++	RXE_CNT_NUMA6,
++	RXE_CNT_NUMA7,
+ 	RXE_NUM_OF_COUNTERS
+ };
+ 
+diff --git a/rxe/rxe_queue.c b/rxe/rxe_queue.c
+index f30cbb3..853c16d 100644
+--- a/rxe/rxe_queue.c
++++ b/rxe/rxe_queue.c
+@@ -66,6 +67,7 @@ struct rxe_queue *rxe_queue_init(struct rxe_dev *rxe, int *num_elem,
+ 	unsigned int num_slots;
+ 	struct mempolicy *mpol_save;
+ 	int il_prev_save;
++	int node;
+ 
+ 	/* num_elem == 0 is allowed, but uninteresting */
+ 	if (*num_elem < 0)
+@@ -115,6 +117,11 @@ struct rxe_queue *rxe_queue_init(struct rxe_dev *rxe, int *num_elem,
+ 	if (!q->buf)
+ 		goto err2;
+ 
++	if (log_numa) {
++		node = page_to_nid(vmalloc_to_page(q->buf));
++		node %= 8;
++		rxe_counter_inc(rxe, RXE_CNT_NUMA0 + node);
++	}
+ 	q->buf->log2_elem_size = q->log2_elem_size;
+ 	q->buf->index_mask = q->index_mask;
+ 
+diff --git a/rxe/rxe.h b/rxe/rxe.h
+index 5264526..7067265 100644
+--- a/rxe/rxe.h
++++ b/rxe/rxe.h
+@@ -51,6 +51,7 @@ extern bool dump_qp_on_error;
+ extern bool disable_numa_balance;
+ extern struct mempolicy rxe_numa_policy;
+ extern unsigned long long exclude_numa_mask;
++extern bool log_numa;
+ 
+ #define rxe_dbg(fmt, ...) pr_debug("%s: " fmt "\n", __func__, ##__VA_ARGS__)
+ #define rxe_dbg_dev(rxe, fmt, ...) ibdev_dbg(&(rxe)->ib_dev,		\

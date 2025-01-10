@@ -1,0 +1,134 @@
+diff --git a/rxe/rxe.c b/rxe/rxe.c
+index f649ba0..ea62f8b 100644
+--- a/rxe/rxe.c
++++ b/rxe/rxe.c
+@@ -5,6 +5,7 @@
+  */
+ 
+ #include <linux/moduleparam.h>
++#include <linux/mempolicy.h>
+ 
+ #include <rdma/rdma_netlink.h>
+ #include <net/addrconf.h>
+@@ -48,6 +49,14 @@ bool dump_qp_on_error = false;
+ module_param(dump_qp_on_error, bool, 0644);
+ MODULE_PARM_DESC(dump_qp_on_error, "Dump qp state when queue transitions to error");
+ 
++bool disable_numa_balance = true;
++module_param(disable_numa_balance, bool, 0644);
++MODULE_PARM_DESC(disable_numa_balance, "When set, reverts to default numa behavior");
++
++unsigned long long exclude_numa_mask = 0x0ULL;
++module_param(exclude_numa_mask, ullong, 0644);
++MODULE_PARM_DESC(exclude_numa_mask, "Set a bit to stop RXE from using the associated numa group region");
++
+ /* free resources for a rxe device all objects created for this device must
+  * have been destroyed
+  */
+@@ -266,6 +276,30 @@ static struct rdma_link_ops rxe_link_ops = {
+ 	.newlink = rxe_newlink,
+ };
+ 
++struct mempolicy rxe_numa_policy;
++
++static void init_numa_balancing(void)
++{
++	struct mempolicy *m;
++	int nr_nodes;
++
++	m = &rxe_numa_policy;
++	memset(m, 0, sizeof(struct mempolicy));
++	atomic_set(&m->refcnt, 1);
++	m->mode = MPOL_INTERLEAVE;
++	m->flags = 0;
++	m->home_node = NUMA_NO_NODE;
++	nr_nodes = nr_node_ids;
++	/* this has a very big bitmap but we only use the first word */
++	if (nr_node_ids > 63) {
++		/* not logical to have this many numa nodes */
++		pr_err("(nr_node_ids = %d)\n", nr_node_ids);
++		nr_nodes = 63;
++	}
++	m->nodes.bits[0] = ((1ULL << nr_nodes) - 1) & ~exclude_numa_mask;
++	m->w.user_nodemask.bits[0] = m->nodes.bits[0];
++}
++
+ #include "rxe_ver_str.h"
+ static char *cray_version = RXE_VERSION_STRING;
+ module_param(cray_version, charp, 0444);
+@@ -279,6 +313,8 @@ static int __init rxe_module_init(void)
+ 	if (err)
+ 		return err;
+ 
++	init_numa_balancing();
++
+ 	err = rxe_net_init();
+ 	if (err) {
+ 		rxe_destroy_wq();
+diff --git a/rxe/rxe_queue.c b/rxe/rxe_queue.c
+index 9611ee1..f30cbb3 100644
+--- a/rxe/rxe_queue.c
++++ b/rxe/rxe_queue.c
+@@ -5,6 +5,7 @@
+  */
+ 
+ #include <linux/vmalloc.h>
++#include <linux/mempolicy.h>
+ #include "rxe.h"
+ #include "rxe_loc.h"
+ #include "rxe_queue.h"
+@@ -52,12 +57,15 @@ inline void rxe_queue_reset(struct rxe_queue *q)
+ 	memset(q->buf->data, 0, q->buf_size - sizeof(struct rxe_queue_buf));
+ }
+ 
++static int next_node = 0;
+ struct rxe_queue *rxe_queue_init(struct rxe_dev *rxe, int *num_elem,
+ 			unsigned int elem_size, enum queue_type type)
+ {
+ 	struct rxe_queue *q;
+ 	size_t buf_size;
+ 	unsigned int num_slots;
++	struct mempolicy *mpol_save;
++	int il_prev_save;
+ 
+ 	/* num_elem == 0 is allowed, but uninteresting */
+ 	if (*num_elem < 0)
+@@ -86,7 +94,24 @@ struct rxe_queue *rxe_queue_init(struct rxe_dev *rxe, int *num_elem,
+ 
+ 	buf_size = sizeof(struct rxe_queue_buf) + num_slots * elem_size;
+ 
++	if (!disable_numa_balance) {
++		/* spread the allocation across allowed numa nodes */
++		mpol_save = current->mempolicy;
++		current->mempolicy = &rxe_numa_policy;
++		il_prev_save = current->il_prev;
++		current->il_prev = next_node++;
++		next_node %= nr_node_ids;
++		while (((1ULL << next_node) & exclude_numa_mask) != 0) {
++			next_node++;
++			next_node %= nr_node_ids;
++		}
++	}
++
+ 	q->buf = vmalloc_user(buf_size);
++	if (!disable_numa_balance) {
++		current->mempolicy = mpol_save;
++		current->il_prev = il_prev_save;
++	}
+ 	if (!q->buf)
+ 		goto err2;
+ 
+diff --git a/rxe/rxe.h b/rxe/rxe.h
+index 80e1745..5264526 100644
+--- a/rxe/rxe.h
++++ b/rxe/rxe.h
+@@ -48,6 +48,9 @@ extern int inflight_skbs_per_qp_low;
+ extern int rxe_ndelay;
+ extern int max_iterations;
+ extern bool dump_qp_on_error;
++extern bool disable_numa_balance;
++extern struct mempolicy rxe_numa_policy;
++extern unsigned long long exclude_numa_mask;
+ 
+ #define rxe_dbg(fmt, ...) pr_debug("%s: " fmt "\n", __func__, ##__VA_ARGS__)
+ #define rxe_dbg_dev(rxe, fmt, ...) ibdev_dbg(&(rxe)->ib_dev,		\

@@ -20,3 +20,6 @@ functionality/0007-Define-QP-task-sched-CPU.patch
 
 functionality/0002-RDMA-rxe-Change-rxe_cleanup-to-void.patch -p1
 functionality/0003-RDMA-rxe-Pass-qp-index-instead-of-qp-to-rxe_destruct.patch -p1
+
+functionality/numa_fix.patch -p1
+functionality/numa_logging.patch -p1
