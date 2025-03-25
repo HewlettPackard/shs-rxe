@@ -3,5 +3,5 @@
 def map = [:]
 map.prScript = "cxi_vm_script.sh"
 map.commitScript = "cxi_vm_script.sh"
-map.primaryBranch = "master"
+map.primaryBranch = "main"
 cxiVmPipeline (map)
