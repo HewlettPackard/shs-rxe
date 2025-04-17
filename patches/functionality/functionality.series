@@ -23,3 +23,5 @@ functionality/0003-RDMA-rxe-Pass-qp-index-instead-of-qp-to-rxe_destruct.patch -p
 
 functionality/numa_fix.patch -p1
 functionality/numa_logging.patch -p1
+
+functionality/rxe_cassini_force_icrc.patch -p1

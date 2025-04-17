@@ -1,0 +1,48 @@
+force iCRC check on small RoCE packets
+
+On Cassini 1, small RoCE packets, less than 65 bytes, may have a bad
+iCRC but the hardware could still pass them up.
+
+When a small packet is detected, the cxi driver will tell rxe to check
+iCRC is indeed valid by setting another bit in the skb flags.
+
+NETCASSINI-3174
+diff --git a/rxe/rxe_hdr.h b/rxe/rxe_hdr.h
+index deadffd..374ee14 100644
+--- a/rxe/rxe_hdr.h
++++ b/rxe/rxe_hdr.h
+@@ -971,7 +971,20 @@ static inline void *payload_addr(struct rxe_pkt_info *pkt)
+ 
+ static inline bool is_crc_stripped(struct rxe_pkt_info *pkt)
+ {
+-	        return (((skb_shinfo(PKT_TO_SKB(pkt))->flags) & BIT(7)) == BIT(7));
++#ifdef SKBTX_ZEROCOPY_FRAG
++	return (((skb_shinfo(PKT_TO_SKB(pkt))->__unused) & BIT(0)) == BIT(0));
++#else
++	return (((skb_shinfo(PKT_TO_SKB(pkt))->flags) & BIT(7)) == BIT(7));
++#endif
++}
++
++static inline bool force_icrc_check(const struct sk_buff *skb)
++{
++#ifdef SKBTX_ZEROCOPY_FRAG
++	return ((skb_shinfo(skb)->__unused & BIT(1)) == BIT(1));
++#else
++	return ((skb_shinfo(skb)->flags & BIT(6)) == BIT(6));
++#endif
+ }
+ 
+ static inline size_t payload_size(struct rxe_pkt_info *pkt)
+diff --git a/rxe/rxe_icrc.c b/rxe/rxe_icrc.c
+index 2553200..cad4772 100644
+--- a/rxe/rxe_icrc.c
++++ b/rxe/rxe_icrc.c
+@@ -232,7 +232,7 @@ int rxe_icrc_check(struct sk_buff *skb, struct rxe_pkt_info *pkt)
+ 	__be32 pkt_icrc;
+ 	__be32 icrc;
+ 
+-	if (rocev2_crc_offload(skb->dev, pkt->rxe))
++	if (rocev2_crc_offload(skb->dev, pkt->rxe) && !force_icrc_check(skb))
+ 		return 0;
+ 
+ 	icrc = rxe_icrc_hdr(skb, pkt);
