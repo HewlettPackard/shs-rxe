@@ -1,0 +1,62 @@
+diff --git a/drivers/infiniband/sw/rxe/rxe.c b/drivers/infiniband/sw/rxe/rxe.c
+index 1ba4a0c8726aed..432e54a29b990a 100644
+--- a/drivers/infiniband/sw/rxe/rxe.c
++++ b/drivers/infiniband/sw/rxe/rxe.c
+@@ -78,8 +78,19 @@ static void rxe_init_device_param(struct rxe_dev *rxe)
+ 	if (!ndev)
+ 		return;
+ 
++	if (ndev->addr_len) {
++		memcpy(rxe->raw_gid, ndev->dev_addr,
++			min_t(unsigned int, ndev->addr_len, ETH_ALEN));
++	} else {
++		/*
++		 * This device does not have a HW address, but
++		 * connection mangagement requires a unique gid.
++		 */
++		eth_random_addr(rxe->raw_gid);
++	}
++
+ 	addrconf_addr_eui48((unsigned char *)&rxe->attr.sys_image_guid,
+-			ndev->dev_addr);
++			rxe->raw_gid);
+ 
+ 	dev_put(ndev);
+ 
+@@ -125,7 +136,7 @@ static void rxe_init_ports(struct rxe_dev *rxe)
+ 	if (!ndev)
+ 		return;
+ 	addrconf_addr_eui48((unsigned char *)&port->port_guid,
+-			    ndev->dev_addr);
++			    rxe->raw_gid);
+ 	dev_put(ndev);
+ 	spin_lock_init(&port->port_lock);
+ }
+diff --git a/drivers/infiniband/sw/rxe/rxe_verbs.c b/drivers/infiniband/sw/rxe/rxe_verbs.c
+index 6152a0fdfc8caa..c46e94f7e86ee8 100644
+--- a/drivers/infiniband/sw/rxe/rxe_verbs.c
++++ b/drivers/infiniband/sw/rxe/rxe_verbs.c
+@@ -1523,7 +1523,7 @@ int rxe_register_device(struct rxe_dev *rxe, const char *ibdev_name,
+ 	dev->num_comp_vectors = num_possible_cpus();
+ 	dev->local_dma_lkey = 0;
+ 	addrconf_addr_eui48((unsigned char *)&dev->node_guid,
+-			    ndev->dev_addr);
++			    rxe->raw_gid);
+ 
+ 	dev->uverbs_cmd_mask |= BIT_ULL(IB_USER_VERBS_CMD_POST_SEND) |
+ 				BIT_ULL(IB_USER_VERBS_CMD_REQ_NOTIFY_CQ);
+diff --git a/drivers/infiniband/sw/rxe/rxe_verbs.h b/drivers/infiniband/sw/rxe/rxe_verbs.h
+index 6573ceec0ef583..729a6ada46af27 100644
+--- a/drivers/infiniband/sw/rxe/rxe_verbs.h
++++ b/drivers/infiniband/sw/rxe/rxe_verbs.h
+@@ -376,7 +376,9 @@ struct rxe_dev {
+ 	struct ib_device_attr	attr;
+ 	int			max_ucontext;
+ 	int			max_inline_data;
+-	struct mutex	usdev_lock;
++	struct mutex		usdev_lock;
++
++	char			raw_gid[ETH_ALEN];
+ 
+ 	struct rxe_pool		uc_pool;
+ 	struct rxe_pool		pd_pool;

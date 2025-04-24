@@ -18,7 +18,7 @@ $(SUBDIRS)::
 	VER_STR=$(VERSION) ./setup_rxe.sh && $(MAKE) -C $(KDIR) M=$(DIR)/$@ $(MAKECMDGOALS)
 
 DIST_FILES = \
-	rxe-6.3.tar.gz \
+	rxe-6.13.tar.gz \
 	cray-rxe-driver.spec \
 	setup_rxe.sh \
 	rxe_versions \

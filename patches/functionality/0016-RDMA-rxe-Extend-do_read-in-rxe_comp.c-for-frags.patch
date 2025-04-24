@@ -1,0 +1,50 @@
+From 3f4fa4a8f73a1327c4a0272431231e0b57c22554 Mon Sep 17 00:00:00 2001
+From: Bob Pearson <rpearsonhpe@gmail.com>
+Date: Fri, 14 Jul 2023 11:47:23 -0500
+Subject: [PATCH 16/18] RDMA/rxe: Extend do_read() in rxe_comp.c for frags
+
+Extend do_read() in rxe_comp.c to support fragmented skbs.
+
+Rename rxe_do_read(). Adjust caller's API.
+
+Signed-off-by: Bob Pearson <rpearsonhpe@gmail.com>
+---
+ drivers/infiniband/sw/rxe/rxe_comp.c | 38 ++++++++++++++++++----------
+ 1 file changed, 25 insertions(+), 13 deletions(-)
+
+diff --git a/drivers/infiniband/sw/rxe/rxe_comp.c b/drivers/infiniband/sw/rxe/rxe_comp.c
+index 670ee08f6f5a..e743679df639 100644
+--- a/drivers/infiniband/sw/rxe/rxe_comp.c
++++ b/drivers/infiniband/sw/rxe/rxe_comp.c
+@@ -360,18 +360,19 @@ static inline enum comp_state do_read(struct rxe_qp *qp,
+				       struct rxe_pkt_info *pkt,
+				       struct rxe_send_wqe *wqe)
+ {
+ 	struct sk_buff *skb = PKT_TO_SKB(pkt);
+-	int skb_offset = 0;
+-	int ret;
++	int nr_frags = skb_shinfo(skb)->nr_frags;
++	u8 *data_addr = payload_addr(pkt);
++	int data_len = payload_size(pkt);
++	enum rxe_mr_copy_dir dir = nr_frags ? RXE_FRAG_TO_MR : RXE_TO_MR_OBJ;
++	int skb_offset = rxe_opcode[pkt->opcode].length;
++	int err;
+ 
+-	ret = copy_data(skb, qp->pd, IB_ACCESS_LOCAL_WRITE,
+-			&wqe->dma, payload_addr(pkt),
+-			skb_offset, payload_size(pkt),
+-			RXE_TO_MR_OBJ);
+-	if (ret) {
+-		wqe->status = IB_WC_LOC_PROT_ERR;
++	err = copy_data(skb, qp->pd, IB_ACCESS_LOCAL_WRITE,
++			&wqe->dma, data_addr,
++			skb_offset, data_len, dir);
++	if (err)
+ 		return COMPST_ERROR;
+-	}
+ 
+ 	if (wqe->dma.resid == 0 && (pkt->mask & RXE_END_MASK))
+ 		return COMPST_COMP_ACK;
+-- 
+2.39.2
+

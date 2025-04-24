@@ -1,0 +1,148 @@
+From 06b296e1121d8e806842c7ff4a08ace49ca18fb8 Mon Sep 17 00:00:00 2001
+From: Bob Pearson <rpearsonhpe@gmail.com>
+Date: Fri, 16 Jun 2023 15:09:37 -0500
+Subject: [PATCH 14/17] RDMA/rxe: Extend response packets for frags
+
+Extend prepare_ack_packet(), read_reply() and send_common_ack() in
+rxe_resp.c to support fragmented skbs.  Adjust calls to these routines
+for the changed API.
+
+Signed-off-by: Bob Pearson <rpearsonhpe@gmail.com>
+---
+ drivers/infiniband/sw/rxe/rxe_resp.c | 59 ++++++++++++++++++----------
+ 1 file changed, 38 insertions(+), 21 deletions(-)
+
+diff --git a/drivers/infiniband/sw/rxe/rxe_resp.c b/drivers/infiniband/sw/rxe/rxe_resp.c
+index 254f2eab8d20..dc62e11dc448 100644
+--- a/drivers/infiniband/sw/rxe/rxe_resp.c
++++ b/drivers/infiniband/sw/rxe/rxe_resp.c
+@@ -765,14 +765,11 @@ static enum resp_states atomic_write_reply(struct rxe_qp *qp,
+ 
+ static struct sk_buff *prepare_ack_packet(struct rxe_qp *qp,
+ 					  struct rxe_pkt_info *ack,
+-					  int opcode,
+-					  int payload,
+-					  u32 psn,
+-					  u8 syndrome)
++					  int opcode, int payload, u32 psn,
++					  u8 syndrome, bool *fragp)
+ {
+ 	struct rxe_dev *rxe = to_rdev(qp->ibqp.device);
+ 	struct sk_buff *skb;
+-	int err;
+ 
+ 	ack->rxe = rxe;
+ 	ack->qp = qp;
+@@ -788,7 +785,7 @@ static struct sk_buff *prepare_ack_packet(struct rxe_qp *qp,
+ 	ack->paylen = rxe_opcode[opcode].length + payload +
+ 			ack->pad + RXE_ICRC_SIZE;
+ 
+-	skb = rxe_init_packet(qp, &qp->pri_av, ack, NULL);
++	skb = rxe_init_packet(qp, &qp->pri_av, ack, fragp);
+ 	if (!skb)
+ 		return NULL;
+ 
+@@ -803,12 +800,6 @@ static struct sk_buff *prepare_ack_packet(struct rxe_qp *qp,
+ 	if (ack->mask & RXE_ATMACK_MASK)
+ 		atmack_set_orig(ack, qp->resp.res->atomic.orig_val);
+ 
+-	err = rxe_prepare(&qp->pri_av, ack, skb);
+-	if (err) {
+-		kfree_skb(skb);
+-		return NULL;
+-	}
+-
+ 	return skb;
+ }
+ 
+@@ -881,7 +872,8 @@ static enum resp_states read_reply(struct rxe_qp *qp,
+ 	struct resp_res *res = qp->resp.res;
+ 	struct rxe_mr *mr;
+ 	unsigned int skb_offset = 0;
+-	u8 *pad_addr;
++	enum rxe_mr_copy_dir dir;
++	bool frag;
+ 
+ 	if (!res) {
+ 		res = rxe_prepare_res(qp, req_pkt, RXE_READ_MASK);
+@@ -898,8 +890,10 @@ static enum resp_states read_reply(struct rxe_qp *qp,
+ 			qp->resp.mr = NULL;
+ 		} else {
+ 			mr = rxe_recheck_mr(qp, res->read.rkey);
+-			if (!mr)
+-				return RESPST_ERR_RKEY_VIOLATION;
++			if (!mr) {
++				state = RESPST_ERR_RKEY_VIOLATION;
++				goto err_out;
++			}
+ 		}
+ 
+ 		if (res->read.resid <= mtu)
+@@ -930,7 +930,7 @@ static enum resp_states read_reply(struct rxe_qp *qp,
+ 	payload = min_t(int, res->read.resid, mtu);
+ 
+ 	skb = prepare_ack_packet(qp, &ack_pkt, opcode, payload,
+-				 res->cur_psn, AETH_ACK_UNLIMITED);
++				 res->cur_psn, AETH_ACK_UNLIMITED, NULL);
+ 	if (!skb) {
+ 		state = RESPST_ERR_RNR;
+ 		goto err_out;
+@@ -945,17 +945,27 @@ static enum resp_states read_reply(struct rxe_qp *qp,
+ 		goto err_out;
+ 	}
+ 
++	dir = frag ? RXE_FRAG_FROM_MR : RXE_FROM_MR_OBJ;
+ 	err = rxe_mr_copy(skb, mr, res->read.va, payload_addr(&ack_pkt),
+-			  skb_offset, payload, RXE_FROM_MR_OBJ);
++			  skb_offset, payload, dir);
+ 	if (err) {
+ 		kfree_skb(skb);
+ 		state = RESPST_ERR_RKEY_VIOLATION;
+ 		goto err_out;
+ 	}
+ 
+-	if (ack_pkt.pad) {
+-		pad_addr = payload_addr(&ack_pkt) + payload;
+-		memset(pad_addr, 0, ack_pkt.pad);
++	err = rxe_prepare_pad_icrc(&ack_pkt, skb, payload, frag);
++	if (err) {
++		kfree_skb(skb);
++		state = RESPST_ERR_RNR;
++		goto err_out;
++	}
++
++	err = rxe_prepare(&qp->pri_av, &ack_pkt, skb);
++	if (err) {
++		kfree_skb(skb);
++		state = RESPST_ERR_RNR;
++		goto err_out;
+ 	}
+ 
+ 	/* rxe_xmit_packet always consumes the skb */
+@@ -1177,10 +1181,23 @@ static int send_common_ack(struct rxe_qp *qp, u8 syndrome, u32 psn,
+ 	struct rxe_pkt_info ack_pkt;
+ 	struct sk_buff *skb;
+ 
+-	skb = prepare_ack_packet(qp, &ack_pkt, opcode, 0, psn, syndrome);
++	skb = prepare_ack_packet(qp, &ack_pkt, opcode, 0, psn,
++				 syndrome, NULL);
+ 	if (!skb)
+ 		return -ENOMEM;
+ 
++	err = rxe_prepare_pad_icrc(&ack_pkt, skb, 0, false);
++	if (err) {
++		kfree_skb(skb);
++		return err;
++	}
++
++	err = rxe_prepare(&qp->pri_av, &ack_pkt, skb);
++	if (err) {
++		kfree_skb(skb);
++		return err;
++	}
++
+ 	err = rxe_xmit_packet(qp, &ack_pkt, skb);
+ 	if (err)
+ 		rxe_dbg_qp(qp, "Failed sending %s\n", msg);
+-- 
+2.39.2

@@ -34,7 +34,7 @@ index 412b8ba..0193539 100644
  
 +static inline bool is_crc_stripped(struct rxe_pkt_info *pkt)
 +{
-+	        return (((skb_shinfo(PKT_TO_SKB(pkt))->flags) & BIT(7)) == BIT(7));
++	return (((skb_shinfo(PKT_TO_SKB(pkt))->flags) & BIT(7)) == BIT(7));
 +}
 +
  static inline size_t payload_size(struct rxe_pkt_info *pkt)

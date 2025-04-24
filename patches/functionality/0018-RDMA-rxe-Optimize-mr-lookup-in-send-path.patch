@@ -1,0 +1,448 @@
+From fbdebb0d1c113e61ff910f9e56df9a8274c43e1c Mon Sep 17 00:00:00 2001
+From: Bob Pearson <rpearsonhpe@gmail.com>
+Date: Sun, 16 Jul 2023 20:47:00 -0500
+Subject: [PATCH 18/18] RDMA/rxe: Optimize mr lookup in send path
+
+Currently the rxe driver looks up the mr from each sge in
+each send wqe for each packet. This patch saves this value
+and reuses it if more that one packet is generated for a given
+sge.
+
+Signed-off-by: Bob Pearson <rpearsonhpe@gmail.com>
+---
+ drivers/infiniband/sw/rxe/rxe_comp.c  |  5 +-
+ drivers/infiniband/sw/rxe/rxe_loc.h   |  2 +-
+ drivers/infiniband/sw/rxe/rxe_mr.c    | 94 +++++++++++++++++++++------
+ drivers/infiniband/sw/rxe/rxe_pool.c  |  2 +
+ drivers/infiniband/sw/rxe/rxe_req.c   | 39 +++++++++--
+ drivers/infiniband/sw/rxe/rxe_resp.c  |  4 +-
+ drivers/infiniband/sw/rxe/rxe_task.c  |  7 +-
+ drivers/infiniband/sw/rxe/rxe_verbs.c |  3 +-
+ drivers/infiniband/sw/rxe/rxe_verbs.h |  1 +
+ 9 files changed, 126 insertions(+), 31 deletions(-)
+
+diff --git a/drivers/infiniband/sw/rxe/rxe_comp.c b/drivers/infiniband/sw/rxe/rxe_comp.c
+index e743679df639..aca5fff9f6d5 100644
+--- a/drivers/infiniband/sw/rxe/rxe_comp.c
++++ b/drivers/infiniband/sw/rxe/rxe_comp.c
+@@ -385,7 +385,7 @@ static inline enum comp_state do_read(struct rxe_qp *qp,
+ 
+ 	err = copy_data(skb, qp->pd, IB_ACCESS_LOCAL_WRITE,
+ 			&wqe->dma, data_addr,
+-			skb_offset, data_len, dir);
++			skb_offset, data_len, dir, NULL);
+ 	if (err)
+ 		return COMPST_ERROR;
+ 
+@@ -407,7 +407,7 @@ static inline enum comp_state do_atomic(struct rxe_qp *qp,
+ 
+ 	ret = copy_data(skb, qp->pd, IB_ACCESS_LOCAL_WRITE,
+ 			&wqe->dma, &atomic_orig,
+-			skb_offset, sizeof(u64), RXE_TO_MR_OBJ);
++			skb_offset, sizeof(u64), RXE_TO_MR_OBJ, NULL);
+ 	if (ret) {
+ 		wqe->status = IB_WC_LOC_PROT_ERR;
+ 		return COMPST_ERROR;
+diff --git a/drivers/infiniband/sw/rxe/rxe_loc.h b/drivers/infiniband/sw/rxe/rxe_loc.h
+index 40624de62288..1c44d21b32ce 100644
+--- a/drivers/infiniband/sw/rxe/rxe_loc.h
++++ b/drivers/infiniband/sw/rxe/rxe_loc.h
+@@ -73,8 +73,8 @@ int rxe_mr_copy(struct sk_buff *skb, struct rxe_mr *mr, u64 iova,
+ int rxe_num_dma_frags(const struct rxe_pd *pd, const struct rxe_dma_info *dma,
+ 		      unsigned int length);
+ int copy_data(struct sk_buff *skb, struct rxe_pd *pd, int access,
+-		struct rxe_dma_info *dma, void *addr, unsigned int skb_offset,
+-		int length, enum rxe_mr_copy_dir dir);
++	      struct rxe_dma_info *dma, void *addr, unsigned int skb_offset,
++	      int length, enum rxe_mr_copy_dir dir, struct rxe_mr **last_mr);
+ int rxe_map_mr_sg(struct ib_mr *ibmr, struct scatterlist *sg,
+ 		  int sg_nents, unsigned int *sg_offset);
+ int rxe_mr_do_atomic_op(struct rxe_mr *mr, u64 iova, int opcode,
+diff --git a/drivers/infiniband/sw/rxe/rxe_mr.c b/drivers/infiniband/sw/rxe/rxe_mr.c
+index c9f42137af62..3d82ff5e8885 100644
+--- a/drivers/infiniband/sw/rxe/rxe_mr.c
++++ b/drivers/infiniband/sw/rxe/rxe_mr.c
+@@ -293,6 +293,16 @@ int rxe_num_mr_frags(struct rxe_mr *mr, u64 iova, unsigned int length)
+ 	return num_frags;
+ }
+ 
++static int check_mr(struct rxe_mr *mr, const struct rxe_pd *pd, int access)
++{
++	/* TODO may need a memory barrier on some cpus */
++	if ((mr_pd(mr) != pd) || ((access & mr->access) != access) ||
++	    (mr->state != RXE_MR_STATE_VALID))
++		return -EINVAL;
++
++	return 0;
++}
++
+ int rxe_num_dma_frags(const struct rxe_pd *pd, const struct rxe_dma_info *dma,
+ 		      unsigned int length)
+ {
+@@ -335,14 +347,17 @@ int rxe_num_dma_frags(const struct rxe_pd *pd, const struct rxe_dma_info *dma,
+ 	unsigned int bytes;
+ 	u64 iova;
+ 	int num_frags = 0;
++	int err;
+ 
+ 	if (WARN_ON(length > dma->resid))
+ 		return 0;
+ 
+ 	while (length) {
+ 		if (offset >= sge->length) {
+-			if (mr)
++			if (mr) {
+ 				rxe_put(mr);
++				mr = NULL;
++			}
+ 			sge++;
+ 			cur_sge++;
+ 			offset = 0;
+@@ -321,9 +331,18 @@ int rxe_num_dma_frags(const struct rxe_pd *pd, const struct rxe_dma_info *dma,
+ 				continue;
+ 		}
+ 		
+-		mr  = lookup_mr(pd, 0, sge->lkey, RXE_LOOKUP_LOCAL);
+-		if (WARN_ON(!mr))
+-			return 0;
++		if (mr) {
++			/* caller can rereg or invalidate mr
++			 * while a data copy is still active
++			 */
++			err = check_mr(mr, pd, 0);
++			if (err)
++				return err;
++		} else {
++			mr = lookup_mr(pd, 0, sge->lkey, RXE_LOOKUP_LOCAL);
++			if (!mr)
++				return -EINVAL;
++		}
+ 
+ 		bytes = min_t(unsigned int, length,
+ 				sge->length - offset);
+@@ -481,7 +481,8 @@ int copy_data(
+ 	void			*addr,
+ 	unsigned int		skb_offset,
+ 	int			length,
+-	enum rxe_mr_copy_dir	dir)
++	enum rxe_mr_copy_dir	dir,
++	struct rxe_mr		**last_mr)
+ {
+ 	int			bytes;
+ 	struct rxe_sge		*sge	= &dma->sge[dma->cur_sge];
+@@ -491,30 +492,50 @@ int copy_data(
+ 	u64			iova;
+ 	int			err 	= 0;
+ 
++	/* recover mr from caller if it is looping */
++	mr = last_mr ? READ_ONCE(*last_mr) : NULL;
++
+ 	if (length == 0)
+-		return 0;
++		goto cleanup;
+ 
+-	if (length > resid)
+-		return = -EINVAL;
++	if (length > resid) {
++		err = -EINVAL;
++		goto cleanup;
++	}
+ 
+ 	while (length > 0) {
+ 		if (offset >= sge->length) {
+-			if (mr)
++			if (mr) {
+ 				rxe_put(mr);
++				mr = NULL;
++			}
+ 
+ 			sge++;
+ 			dma->cur_sge++;
+ 			offset = 0;
+ 
+-			if (dma->cur_sge >= dma->num_sge)
+-				return -EINVAL;
++			if (dma->cur_sge >= dma->num_sge) {
++				err = -EINVAL;
++				goto cleanup;
++			}
+ 			if (!sge->length) 
+ 				continue;
+ 		}
+ 
+-		mr = lookup_mr(pd, access, sge->lkey, RXE_LOOKUP_LOCAL);
+-		if (!mr)
+-			return -EINVAL;
++		if (mr) {
++			/* caller can rereg or invalidate mr
++			 * while a data copy is still active
++			 */
++			err = check_mr(mr, pd, access);
++			if (err)
++				goto cleanup;
++		} else {
++			mr = lookup_mr(pd, access, sge->lkey, RXE_LOOKUP_LOCAL);
++			if (!mr) {
++				err = -EINVAL;
++				goto cleanup;
++			}
++		}
+ 
+ 		bytes = min_t(int, length, sge->length - offset);
+ 		if (bytes > 0) {
+@@ -586,7 +632,7 @@ int copy_data(struct sk_buff *skb, struct rxe_pd *pd, int access,
+ 			err = rxe_mr_copy(skb, mr, iova, addr,
+ 					  skb_offset, bytes, dir);
+ 			if (err)
+-				goto err_put;
++				goto cleanup;
+ 
+ 			offset	+= bytes;
+ 			resid	-= bytes;
+@@ -599,7 +645,17 @@ int copy_data(struct sk_buff *skb, struct rxe_pd *pd, int access,
+ 	dma->sge_offset = offset;
+ 	dma->resid	= resid;
+ 
+-err_put:
++	if (resid && last_mr) {
++		/* pass mr and reference up to caller to return
++		 * in the next iteration or drop the reference
++		 */
++		WRITE_ONCE(*last_mr, mr);
++		return 0;
++	}
++
++cleanup:
++	if (last_mr)
++		WRITE_ONCE(*last_mr, NULL);
+ 	if (mr)
+ 		rxe_put(mr);
+ 	return err;
+@@ -808,10 +864,10 @@ struct rxe_mr *lookup_mr(const struct rxe_pd *pd, int access, u32 key,
+ 	if (!mr)
+ 		return NULL;
+ 
++	/* TODO need to convert to lkey == rkey to match other drivers */
+ 	if (unlikely((type == RXE_LOOKUP_LOCAL && mr->lkey != key) ||
+ 		     (type == RXE_LOOKUP_REMOTE && mr->rkey != key) ||
+-		     mr_pd(mr) != pd || ((access & mr->access) != access) ||
+-		     mr->state != RXE_MR_STATE_VALID)) {
++		     check_mr(mr, pd, access))) {
+ 		rxe_put(mr);
+ 		mr = NULL;
+ 	}
+diff --git a/drivers/infiniband/sw/rxe/rxe_pool.c b/drivers/infiniband/sw/rxe/rxe_pool.c
+index 3249c2741491..7ab4cac0a14b 100644
+--- a/drivers/infiniband/sw/rxe/rxe_pool.c
++++ b/drivers/infiniband/sw/rxe/rxe_pool.c
+@@ -206,12 +206,9 @@ int __rxe_cleanup(struct rxe_pool_elem *elem, bool sleepable)
+ 			ret = wait_for_completion_timeout(&elem->complete,
+ 					msecs_to_jiffies(50000));
+ 
+-			/* Shouldn't happen. There are still references to
+-			 * the object but, rather than deadlock, free the
+-			 * object or pass back to rdma-core.
+-			 */
+-			if (WARN_ON(!ret))
+-				err = -ETIMEDOUT;
++			WARN_ON(!ret);
++			if (!kref_read(&elem->ref_cnt))
++				break;
+ 		}
+ 	} else {
+ 		unsigned long until = jiffies + RXE_POOL_TIMEOUT;
+diff --git a/drivers/infiniband/sw/rxe/rxe_req.c b/drivers/infiniband/sw/rxe/rxe_req.c
+index 36af200e27a2..76d85731a45f 100644
+--- a/drivers/infiniband/sw/rxe/rxe_req.c
++++ b/drivers/infiniband/sw/rxe/rxe_req.c
+@@ -13,6 +13,16 @@
+ static int next_opcode(struct rxe_qp *qp, struct rxe_send_wqe *wqe,
+ 		       u32 opcode);
+ 
++/* We cache the mr in rxe_req_info if we are processing back to back
++ * packets from a wqe.  Anytime we stop we have to free the cached mr
++ */
++static void forget_mr(struct rxe_qp *qp)
++{
++	if (qp->req.last_mr)
++		rxe_put(qp->req.last_mr);
++	WRITE_ONCE(qp->req.last_mr, NULL);
++}
++
+ static inline void retry_first_write_send(struct rxe_qp *qp,
+ 					  struct rxe_send_wqe *wqe, int npsn)
+ {
+@@ -45,6 +55,8 @@ static void req_retry(struct rxe_qp *qp)
+ 	unsigned int cons;
+ 	unsigned int prod;
+ 
++	forget_mr(qp);
++
+ 	cons = queue_get_consumer(q, QUEUE_TYPE_FROM_CLIENT);
+ 	prod = queue_get_producer(q, QUEUE_TYPE_FROM_CLIENT);
+ 
+@@ -507,8 +519,15 @@ static int rxe_init_payload(struct rxe_qp *qp, struct rxe_send_wqe *wqe,
+ 	} else {
+ 		dir = frag ? RXE_FRAG_FROM_MR : RXE_FROM_MR_OBJ;
+ 		addr = frag ? NULL : payload_addr(pkt);
++		if (pkt->mask & RXE_START_MASK)
++			/* we must always call forget_mr(qp)
++			 * before we get here
++			 */
++			WARN_ON(qp->req.last_mr);
+ 		err = copy_data(skb, qp->pd, 0, &wqe->dma,
+-				addr, skb_offset, payload, dir);
++				addr, skb_offset, payload, dir, &qp->req.last_mr);
++		if (err || (pkt->mask & RXE_END_MASK))
++			forget_mr(qp);
+ 	}
+ 
+ 	return err;
+@@ -626,6 +645,7 @@ static struct sk_buff *rxe_init_req_packet(struct rxe_qp *qp,
+ 	return skb;
+ 
+ err_out:
++	forget_mr(qp);
+ 	if (err == -EFAULT)
+ 		wqe->status = IB_WC_LOC_PROT_ERR;
+ 	else
+@@ -765,6 +785,7 @@ int rxe_requester(struct rxe_qp *qp)
+ 	int ret;
+ 	struct rxe_queue *q = qp->sq.queue;
+ 	unsigned long flags;
++	int iterations = 0;
+ 
+ 	spin_lock_irqsave(&qp->state_lock, flags);
+ 	if (unlikely(!qp->valid)) {
+@@ -807,6 +828,7 @@ int rxe_requester(struct rxe_qp *qp)
+ 		qp->req.need_retry = 0;
+ 	}
+ 
++again:
+ 	wqe = req_next_wqe(qp);
+ 	if (unlikely(!wqe))
+ 		goto exit;
+@@ -879,12 +901,19 @@ int rxe_requester(struct rxe_qp *qp)
+ 	update_wqe_psn(qp, wqe, &pkt, payload);
+ 	update_state(qp, &pkt);
+ 
+-	/* A non-zero return value will cause rxe_do_task to
+-	 * exit its loop and end the work item. A zero return
++	/* Loop locally until we finish the current wqe */
++	if (!(pkt.mask & RXE_END_MASK)) {
++		iterations++;
++		goto again;
++	}
++
++	/* A negative return value will cause rxe_do_task to
++	 * exit its loop and end the work item. A >= return
+ 	 * will continue looping and return to rxe_requester
++	 * until the total iteration count exceeds RXE_MAX_ITERATIONS
+ 	 */
+ done:
+-	ret = 0;
++	ret = iterations;
+ 	goto out;
+ err:
+ 	/* update wqe_index for each wqe completion */
+@@ -894,6 +923,7 @@ err:
+ exit:
+ 	ret = -EAGAIN;
+ out:
++	forget_mr(qp);
+ 	return ret;
+ }
+ 
+@@ -934,9 +934,12 @@ int rxe_sender(struct rxe_qp *qp)
+ {
+	int req_ret;
+	int comp_ret;
++	int iterations = 0;
+ 
+ 	/* process the send queue */
+ 	req_ret = rxe_requester(qp);
++	if(req_ret > 0)
++		iterations += req_ret;
+ 
+ 	/* process the response queue */
+ 	comp_ret = rxe_completer(qp);
+@@ -941,5 +943,5 @@ int rxe_sender(struct rxe_qp *qp)
+ 	/* exit the task loop if both requester and completer
+ 	 * are ready
+ 	 */
+-	return (req_ret && comp_ret) ? -EAGAIN : 0;
++	return ((req_ret < 0) && (comp_ret< 0)) ? -EAGAIN : iterations;
+ }
+diff --git a/drivers/infiniband/sw/rxe/rxe_resp.c b/drivers/infiniband/sw/rxe/rxe_resp.c
+index fc959bacb906..9bfa8a4c19d3 100644
+--- a/drivers/infiniband/sw/rxe/rxe_resp.c
++++ b/drivers/infiniband/sw/rxe/rxe_resp.c
+@@ -591,7 +591,7 @@ static enum resp_states send_data_in(struct rxe_qp *qp,
+ 		}
+ 		err = copy_data(skb, qp->pd, IB_ACCESS_LOCAL_WRITE,
+ 				&qp->resp.wqe->dma, &hdr, skb_offset,
+-				sizeof(hdr), RXE_TO_MR_OBJ);
++				sizeof(hdr), RXE_TO_MR_OBJ, NULL);
+ 		if (err)
+ 			goto err_out;
+ 	}
+@@ -601,8 +601,8 @@ static enum resp_states send_data_in(struct rxe_qp *qp,
+ 	skb_offset = rxe_opcode[pkt->opcode].length;
+ 	err = copy_data(skb, qp->pd, IB_ACCESS_LOCAL_WRITE,
+ 			&qp->resp.wqe->dma, data_addr,
+-			skb_offset, data_len, dir);
++			skb_offset, data_len, dir, NULL);
+ 
+ 	if (unlikely(err))
+ 		goto err_out;
+ 
+diff --git a/drivers/infiniband/sw/rxe/rxe_task.c b/drivers/infiniband/sw/rxe/rxe_task.c
+index 1501120d4f52..9edbfe9b1dcd 100644
+--- a/drivers/infiniband/sw/rxe/rxe_task.c
++++ b/drivers/infiniband/sw/rxe/rxe_task.c
+@@ -125,13 +125,16 @@ static void do_task(struct rxe_task *task)
+ 
+ 		do {
+ 			ret = task->func(task->qp);
+-		} while (ret == 0 && iterations-- > 0);
++			if (ret < 0)
++				break;
++			iterations -= ret;
++		} while (iterations-- > 0);
+ 
+ 		spin_lock_irqsave(&task->lock, flags);
+ 		/* we're not done yet but we ran out of iterations.
+ 		 * yield the cpu and reschedule the task
+ 		 */
+-		if (!ret) {
++		if (ret >= 0) {
+ 			task->state = TASK_STATE_IDLE;
+ 			resched = 1;
+ 			goto exit;
+diff --git a/drivers/infiniband/sw/rxe/rxe_verbs.h b/drivers/infiniband/sw/rxe/rxe_verbs.h
+index 89cf50b938c2..a00dad7fb7a8 100644
+--- a/drivers/infiniband/sw/rxe/rxe_verbs.h
++++ b/drivers/infiniband/sw/rxe/rxe_verbs.h
+@@ -103,6 +103,7 @@ struct rxe_srq {
+ };
+ 
+ struct rxe_req_info {
++	struct rxe_mr		*last_mr;
+ 	int			wqe_index;
+ 	u32			psn;
+ 	int			opcode;
+diff --git a/drivers/infiniband/sw/rxe/rxe_net.c b/drivers/infiniband/sw/rxe/rxe_net.c
+index 928508558df4..a2fc118e7ec1 100644
+--- a/drivers/infiniband/sw/rxe/rxe_net.c
++++ b/drivers/infiniband/sw/rxe/rxe_net.c
+@@ -436,7 +436,7 @@ static int rxe_loopback(struct sk_buff *skb, struct rxe_pkt_info *pkt)
+	/* remove udp header */
+	skb_pull(skb, sizeof(struct udphdr));
+
+-	rxe_rcv(skb);
++	rxe_udp_encap_recv(NULL, skb);
+ 
+	return 0;
+ drop:
+-- 
+2.39.2

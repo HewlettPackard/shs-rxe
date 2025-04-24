@@ -1,0 +1,289 @@
+From dc27f1551885b2e5005656a7bfe7008805c0f645 Mon Sep 17 00:00:00 2001
+From: Bob Pearson <rpearsonhpe@gmail.com>
+Date: Fri, 16 Jun 2023 14:12:45 -0500
+Subject: [PATCH 09/17] RDMA/rxe: Extend rxe_mr_copy to support skb frags
+
+Extend the operations to support copying between an mr and an skb
+fragment list. Fixup calls to rxe_mr_copy() to support the new API.
+Add two APIs rxe_add_frag() and rxe_num_mr_frags() to add a fragment
+to and skb and count the total number of fragments needed.
+
+Signed-off-by: Bob Pearson <rpearsonhpe@gmail.com>
+
+diff --git a/drivers/infiniband/sw/rxe/rxe_resp.c b/drivers/infiniband/sw/rxe/rxe_resp.c
+index 596615c515ad..87d61a462ff5 100644
+--- a/drivers/infiniband/sw/rxe/rxe_resp.c
++++ b/drivers/infiniband/sw/rxe/rxe_resp.c
+@@ -576,12 +576,15 @@ static enum resp_states send_data_in(struct rxe_qp *qp, void *data_addr,
+ static enum resp_states write_data_in(struct rxe_qp *qp,
+ 				      struct rxe_pkt_info *pkt)
+ {
++	struct sk_buff *skb = PKT_TO_SKB(pkt);
+ 	enum resp_states rc = RESPST_NONE;
+-	int	err;
+ 	int data_len = payload_size(pkt);
++	int err;
++	int skb_offset = 0;
+ 
+-	err = rxe_mr_copy(qp->resp.mr, qp->resp.va + qp->resp.offset,
+-			  payload_addr(pkt), data_len, RXE_TO_MR_OBJ);
++	err = rxe_mr_copy(skb, qp->resp.mr, qp->resp.va + qp->resp.offset,
++			  payload_addr(pkt), skb_offset, data_len,
++			  RXE_TO_MR_OBJ);
+ 	if (err) {
+ 		rc = RESPST_ERR_RKEY_VIOLATION;
+ 		goto out;
+@@ -876,6 +879,7 @@ static enum resp_states read_reply(struct rxe_qp *qp,
+ 	int err;
+ 	struct resp_res *res = qp->resp.res;
+ 	struct rxe_mr *mr;
++	unsigned int skb_offset = 0;
+ 	u8 *pad_addr;
+ 
+ 	if (!res) {
+@@ -927,8 +931,8 @@ static enum resp_states read_reply(struct rxe_qp *qp,
+ 		goto err_out;
+ 	}
+ 
+-	err = rxe_mr_copy(mr, res->read.va, payload_addr(&ack_pkt),
+-			  payload, RXE_FROM_MR_OBJ);
++	err = rxe_mr_copy(skb, mr, res->read.va, payload_addr(&ack_pkt),
++			  skb_offset, payload, RXE_FROM_MR_OBJ);
+ 	if (err) {
+ 		kfree_skb(skb);
+ 		state = RESPST_ERR_RKEY_VIOLATION;
+diff --git a/drivers/infiniband/sw/rxe/rxe_verbs.h b/drivers/infiniband/sw/rxe/rxe_verbs.h
+index fd48075..b2f8d04 100644
+--- a/drivers/infiniband/sw/rxe/rxe_verbs.h
++++ b/drivers/infiniband/sw/rxe/rxe_verbs.h
+@@ -316,6 +316,8 @@ enum rxe_mr_state {
+ enum rxe_mr_copy_dir {
+ 	RXE_TO_MR_OBJ,
+ 	RXE_FROM_MR_OBJ,
++	RXE_FRAG_TO_MR,
++	RXE_FRAG_FROM_MR,
+ };
+ 
+ enum rxe_mr_lookup_type {
+diff --git a/drivers/infiniband/sw/rxe/rxe_loc.h b/drivers/infiniband/sw/rxe/rxe_loc.h
+index 18c4f38..dfeaa4d 100644
+--- a/drivers/infiniband/sw/rxe/rxe_loc.h
++++ b/drivers/infiniband/sw/rxe/rxe_loc.h
+@@ -64,7 +64,11 @@ int rxe_mr_init_user(struct rxe_dev *rxe, u64 start, u64 length,
+ 		     int access, struct rxe_mr *mr);
+ int rxe_mr_init_fast(int max_pages, struct rxe_mr *mr);
+ int rxe_flush_pmem_iova(struct rxe_mr *mr, u64 iova, unsigned int length);
+-int rxe_mr_copy(struct rxe_mr *mr, u64 iova, void *addr,
++int rxe_add_frag(struct sk_buff *skb, struct rxe_mr *mr, struct page *page,
++		 unsigned int length, unsigned int offset);
++int rxe_num_mr_frags(struct rxe_mr *mr, u64 iova, unsigned int length);
++int rxe_mr_copy(struct sk_buff *skb, struct rxe_mr *mr, u64 iova,
++		void *addr, unsigned int skb_offset,
+ 		unsigned int length, enum rxe_mr_copy_dir dir);
+ int copy_data(struct rxe_pd *pd, int access, struct rxe_dma_info *dma,
+ 	      void *addr, int length, enum rxe_mr_copy_dir dir);
+diff --git a/drivers/infiniband/sw/rxe/rxe_mr.c b/drivers/infiniband/sw/rxe/rxe_mr.c
+index 868d2f0..2a0df3f 100644
+--- a/drivers/infiniband/sw/rxe/rxe_mr.c
++++ b/drivers/infiniband/sw/rxe/rxe_mr.c
+@@ -242,7 +242,59 @@ int rxe_map_mr_sg(struct ib_mr *ibmr, struct scatterlist *sgl,
+ 	return ib_sg_to_pages(ibmr, sgl, sg_nents, sg_offset, rxe_set_page);
+ }
+ 
+-static int rxe_mr_copy_xarray(struct rxe_mr *mr, u64 iova, void *addr,
++int rxe_add_frag(struct sk_buff *skb, struct rxe_mr *mr, struct page *page,
++		 unsigned int length, unsigned int offset)
++{
++	int nr_frags = skb_shinfo(skb)->nr_frags;
++	skb_frag_t *frag = &skb_shinfo(skb)->frags[nr_frags];
++
++	if (nr_frags > MAX_SKB_FRAGS) {
++		if (mr)
++			rxe_dbg_mr(mr, "ran out of frags");
++		else
++			rxe_dbg("ran out of frags");
++		return -EINVAL;
++	}
++
++	frag->bv_len = length;
++	frag->bv_offset = offset;
++	frag->bv_page = page;
++	/* because kfree_skb will call put_page() */
++	get_page(page);
++	skb_shinfo(skb)->nr_frags++;
++
++	skb->data_len += length;
++	skb->len += length;
++
++	return 0;
++}
++
++int rxe_num_mr_frags(struct rxe_mr *mr, u64 iova, unsigned int length)
++{
++	unsigned int page_size;
++	unsigned int page_offset;
++	unsigned int bytes;
++	int num_frags = 0;
++
++	if (mr->ibmr.type == IB_MR_TYPE_DMA)
++		page_size = PAGE_SIZE;
++	else
++		page_size = mr_page_size(mr);
++	page_offset = iova & (page_size - 1);
++
++	while (length) {
++		bytes = min_t(unsigned int, length,
++				page_size - page_offset);
++		length -= bytes;
++		page_offset = 0;
++		num_frags++;
++	}
++
++	return num_frags;
++}
++
++static int rxe_mr_copy_xarray(struct sk_buff *skb, struct rxe_mr *mr,
++			      u64 iova, void *addr, unsigned int skb_offset,
+ 			      unsigned int length, enum rxe_mr_copy_dir dir)
+ {
+ 	unsigned int page_offset = rxe_mr_iova_to_page_offset(mr, iova);
+@@ -250,6 +299,7 @@ static int rxe_mr_copy_xarray(struct rxe_mr *mr, u64 iova, void *addr,
+ 	unsigned int bytes;
+ 	struct page *page;
+ 	void *va;
++	int err = 0;
+ 
+ 	while (length) {
+ 		page = xa_load(&mr->page_list, index);
+@@ -258,12 +308,29 @@ static int rxe_mr_copy_xarray(struct rxe_mr *mr, u64 iova, void *addr,
+ 
+ 		bytes = min_t(unsigned int, length,
+ 				mr_page_size(mr) - page_offset);
+-		va = kmap_local_page(page);
+-		if (dir == RXE_FROM_MR_OBJ)
+-			memcpy(addr, va + page_offset, bytes);
+-		else
+-			memcpy(va + page_offset, addr, bytes);
+-		kunmap_local(va);
++		if (dir == RXE_FRAG_FROM_MR)
++			err = rxe_add_frag(skb, mr, page, bytes,
++					   page_offset);
++		else {
++			va = kmap_local_page(page);
++			switch (dir) {
++			case RXE_FROM_MR_OBJ:
++				memcpy(addr, va + page_offset, bytes);
++				break;
++			case RXE_TO_MR_OBJ:
++				memcpy(va + page_offset, addr, bytes);
++				break;
++			case RXE_FRAG_TO_MR:
++				err = skb_copy_bits(skb, skb_offset, va + page_offset, bytes);
++				skb_offset += bytes;
++				break;
++			case RXE_FRAG_FROM_MR:
++				break;
++			}
++			kunmap_local(va);
++		}
++		if (err)
++			return err;
+ 
+ 		page_offset = 0;
+ 		addr += bytes;
+@@ -274,34 +341,55 @@ static int rxe_mr_copy_xarray(struct rxe_mr *mr, u64 iova, void *addr,
+ 	return 0;
+ }
+ 
+-static void rxe_mr_copy_dma(struct rxe_mr *mr, u64 dma_addr, void *addr,
++static int rxe_mr_copy_dma(struct sk_buff *skb, struct rxe_mr *mr,
++			    u64 dma_addr, void *addr, unsigned int skb_offset,
+ 			    unsigned int length, enum rxe_mr_copy_dir dir)
+ {
+ 	unsigned int page_offset = dma_addr & (PAGE_SIZE - 1);
+ 	unsigned int bytes;
+ 	struct page *page;
+ 	u8 *va;
++	int err = 0;
+ 
+ 	while (length) {
+ 		page = ib_virt_dma_to_page(dma_addr);
+ 		bytes = min_t(unsigned int, length,
+ 				PAGE_SIZE - page_offset);
+-		va = kmap_local_page(page);
+-
+-		if (dir == RXE_TO_MR_OBJ)
+-			memcpy(va + page_offset, addr, bytes);
+-		else
+-			memcpy(addr, va + page_offset, bytes);
++		if (dir == RXE_FRAG_FROM_MR)
++			err = rxe_add_frag(skb, mr, page, bytes,
++					   page_offset);
++		else {
++			va = kmap_local_page(page);
++			switch (dir) {
++			case RXE_FROM_MR_OBJ:
++				memcpy(addr, va + page_offset, bytes);
++				break;
++			case RXE_TO_MR_OBJ:
++				memcpy(va + page_offset, addr, bytes);
++				break;
++			case RXE_FRAG_TO_MR:
++				err = skb_copy_bits(skb, skb_offset, va + page_offset, bytes);
++				skb_offset += bytes;
++				break;
++			case RXE_FRAG_FROM_MR:
++				break;
++			}
++			kunmap_local(va);
++		}
++		if (err)
++			return err;
+ 
+-		kunmap_local(va);
+ 		page_offset = 0;
+ 		dma_addr += bytes;
+ 		addr += bytes;
+ 		length -= bytes;
+ 	}
++	
++	return 0;
+ }
+ 
+-int rxe_mr_copy(struct rxe_mr *mr, u64 iova, void *addr,
++int rxe_mr_copy(struct sk_buff *skb, struct rxe_mr *mr, u64 iova,
++		void *addr, unsigned int skb_offset,
+ 		unsigned int length, enum rxe_mr_copy_dir dir)
+ {
+ 	int err;
+@@ -313,8 +401,8 @@ int rxe_mr_copy(struct rxe_mr *mr, u64 iova, void *addr,
+ 		return -EINVAL;
+ 
+ 	if (mr->ibmr.type == IB_MR_TYPE_DMA) {
+-		rxe_mr_copy_dma(mr, iova, addr, length, dir);
+-		return 0;
++		return rxe_mr_copy_dma(skb, mr, iova, addr, skb_offset,
++				       length, dir);
+ 	}
+ 
+ 	err = mr_check_range(mr, iova, length);
+@@ -324,7 +412,8 @@ int rxe_mr_copy(struct rxe_mr *mr, u64 iova, void *addr,
+ 		return err; 
+ 	}
+
+-	return rxe_mr_copy_xarray(mr, iova, addr, length, dir);
++	return rxe_mr_copy_xarray(skb, mr, iova, addr, skb_offset,
++					  length, dir);
+ }
+ 
+ /* copy data in or out of a wqe, i.e. sg list
+@@ -398,7 +488,8 @@ int copy_data(
+ 
+ 		if (bytes > 0) {
+ 			iova = sge->addr + offset;
+-			err = rxe_mr_copy(mr, iova, addr, bytes, dir);
++			err = rxe_mr_copy(NULL, mr, iova, addr, 0,
++					  bytes, dir);
+ 			if (err)
+ 				goto err2;
+ 

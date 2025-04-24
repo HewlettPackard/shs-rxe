@@ -64,7 +64,7 @@ index abbaa41017e87..7a60c7709da04 100644
 +skip_check_range:
  	if (pkt->mask & (RXE_WRITE_MASK | RXE_ATOMIC_WRITE_MASK)) {
  		if (resid > mtu) {
- 			if (pktlen != mtu || bth_pad(pkt)) {
+ 			if (pktlen != mtu || pkt->pad) {
 @@ -620,11 +620,61 @@ static struct resp_res *rxe_prepare_res(struct rxe_qp *qp,
  		res->last_psn = pkt->psn;
  		res->cur_psn = pkt->psn;

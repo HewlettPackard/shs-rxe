@@ -1,0 +1,74 @@
+diff --git a/rxe/rxe_req.c b/rxe/rxe_req.c
+index 7a36614..50ae6af 100644
+--- a/rxe/rxe_req.c
++++ b/rxe/rxe_req.c
+@@ -410,29 +410,14 @@ static inline int get_mtu(struct rxe_qp *qp)
+ 	return rxe->port.mtu_cap;
+ }
+ 
+-static struct sk_buff *init_req_packet(struct rxe_qp *qp,
+-				       struct rxe_av *av,
+-				       struct rxe_send_wqe *wqe,
+-				       int opcode, u32 payload,
+-				       struct rxe_pkt_info *pkt)
++static void rxe_init_roce_hdrs(struct rxe_qp *qp, struct rxe_send_wqe *wqe,
++				struct rxe_pkt_info *pkt)
+ {
+-	struct rxe_dev		*rxe = to_rdev(qp->ibqp.device);
+-	struct sk_buff		*skb;
+ 	struct rxe_send_wr	*ibwr = &wqe->wr;
+ 	int			solicited;
+ 	u32			qp_num;
+ 	int			ack_req = 0;
+ 
+-	/* length from start of bth to end of icrc */
+-	pkt->pad = (-payload) & 0x3;
+-	pkt->paylen = rxe_opcode[opcode].length + payload +
+-			pkt->pad + RXE_ICRC_SIZE;
+-
+-	/* init skb */
+-	skb = rxe_init_packet(rxe, av, pkt->paylen, pkt);
+-	if (unlikely(!skb))
+-		return NULL;
+-
+ 	/* init bth */
+ 	solicited = (ibwr->send_flags & IB_SEND_SOLICITED) &&
+ 			(pkt->mask & RXE_END_MASK) &&
+@@ -475,7 +460,7 @@ static struct sk_buff *init_req_packet(struct rxe_qp *qp,
+ 
+ 	if (pkt->mask & RXE_ATMETH_MASK) {
+ 		atmeth_set_va(pkt, wqe->iova);
+-		if (opcode == IB_OPCODE_RC_COMPARE_SWAP) {
++		if (pkt->opcode == IB_OPCODE_RC_COMPARE_SWAP) {
+ 			atmeth_set_swap_add(pkt, ibwr->wr.atomic.swap);
+ 			atmeth_set_comp(pkt, ibwr->wr.atomic.compare_add);
+ 		} else {
+@@ -491,6 +476,28 @@ static struct sk_buff *init_req_packet(struct rxe_qp *qp,
+ 			deth_set_qkey(pkt, ibwr->wr.ud.remote_qkey);
+ 		deth_set_sqp(pkt, qp->ibqp.qp_num);
+ 	}
++}
++
++static struct sk_buff *init_req_packet(struct rxe_qp *qp,
++				       struct rxe_av *av,
++				       struct rxe_send_wqe *wqe,
++				       int opcode, u32 payload,
++				       struct rxe_pkt_info *pkt)
++{
++	struct rxe_dev		*rxe = to_rdev(qp->ibqp.device);
++	struct sk_buff		*skb;
++
++	/* length from start of bth to end of icrc */
++	pkt->pad = (-payload) & 0x3;
++	pkt->paylen = rxe_opcode[opcode].length + payload +
++			pkt->pad + RXE_ICRC_SIZE;
++
++	/* init skb */
++	skb = rxe_init_packet(rxe, av, pkt->paylen, pkt);
++	if (unlikely(!skb))
++		return NULL;
++
++	rxe_init_roce_hdrs(qp, wqe, pkt);
+ 
+ 	return skb;
+ }

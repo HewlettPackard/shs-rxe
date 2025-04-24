@@ -24,7 +24,7 @@ diff --git a/rxe/rxe_mr.c b/rxe/rxe_mr.c
 index 0e538fa..c9313e0 100644
 --- a/rxe/rxe_mr.c
 +++ b/rxe/rxe_mr.c
-@@ -653,13 +653,26 @@ int rxe_invalidate_mr(struct rxe_qp *qp, u32 key)
+@@ -653,14 +653,27 @@ int rxe_invalidate_mr(struct rxe_qp *qp, u32 key)
  		goto err;
  	}
  
@@ -34,15 +34,16 @@ index 0e538fa..c9313e0 100644
 +	if (mr->state == RXE_MR_STATE_FREE)
 +		goto skip_key_check;
 +
- 	if (mr->rkey ? (key != mr->rkey) : (key != mr->lkey)) {
+ 	remote = mr->access & RXE_ACCESS_REMOTE;
+ 	if (remote ? (key != mr->rkey) : (key != mr->lkey)) {
 +		/* There are some cases where a fast reg may not have
 +		 * created a wqe to be purged during queue reset.  In this
 +		 * case, the key can be off by one.  Allow the case.
 +		 */
-+		if (mr->rkey ? (key == (mr->rkey + 1)) : (key == (mr->lkey + 1)))
++		if (remote ? (key == (mr->rkey + 1)) : (key == (mr->lkey + 1)))
 +			goto skip_key_check;
  		rxe_dbg_mr(mr, "wr key (%#x) doesn't match mr key (%#x)\n",
- 			key, (mr->rkey ? mr->rkey : mr->lkey));
+ 			key, (remote ? mr->rkey : mr->lkey));
  		ret = -EINVAL;
  		goto err_drop_ref;
  	}

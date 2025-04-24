@@ -15,34 +15,34 @@ diff --git a/rxe/rxe_qp.c b/rxe/rxe_qp.c
 index 3b642a1..67045a6 100644
 --- a/rxe/rxe_qp.c
 +++ b/rxe/rxe_qp.c
-@@ -214,6 +214,7 @@ static int rxe_qp_init_req(struct rxe_dev *rxe, struct rxe_qp *qp,
+@@ -239,6 +239,7 @@ static int rxe_qp_init_req(struct rxe_dev *rxe, struct rxe_qp *qp,
+ 			   struct rxe_create_qp_resp __user *uresp)
+ {
  	int err;
- 	int wqe_size;
- 	enum queue_type type;
 +	int sched_cpu_hint = qp->scq ? qp->scq->ibcq.comp_vector : -1;
  
- 	err = sock_create_kern(&init_net, AF_INET, SOCK_DGRAM, 0, &qp->sk);
- 	if (err < 0)
-@@ -236,7 +236,7 @@ static int rxe_qp_init_req(struct rxe_dev *rxe, struct rxe_qp *qp,
- 
+ 	/* if we don't finish qp create make sure queue is valid */
  	skb_queue_head_init(&qp->req_pkts);
+@@ -267,7 +268,7 @@ static int rxe_qp_init_req(struct rxe_dev *rxe, struct rxe_qp *qp,
+ 	qp->req.opcode		= -1;
+ 	qp->comp.opcode		= -1;
  
 -	rxe_init_task(&qp->send_task, qp, rxe_sender, 0);
 +	rxe_init_task(&qp->send_task, qp, rxe_sender, sched_cpu_hint);
  
  	qp->qp_timeout_jiffies = 0; /* Can't be set for UD/UC in modify_qp */
  	if (init->qp_type == IB_QPT_RC) {
-@@ -287,6 +288,7 @@ static int rxe_qp_init_resp(struct rxe_dev *rxe, struct rxe_qp *qp,
+@@ -328,6 +329,7 @@ static int rxe_qp_init_resp(struct rxe_dev *rxe, struct rxe_qp *qp,
+ 			    struct rxe_create_qp_resp __user *uresp)
+ {
  	int err;
- 	int wqe_size;
- 	enum queue_type type;
 +	int sched_cpu_hint = qp->rcq ? qp->rcq->ibcq.comp_vector : -1;
  
- 	if (!qp->srq) {
- 		qp->rq.max_wr		= init->cap.max_recv_wr;
-@@ -281,7 +281,7 @@ static int rxe_qp_init_resp(struct rxe_dev *rxe, struct rxe_qp *qp,
- 
+ 	/* if we don't finish qp create make sure queue is valid */
  	skb_queue_head_init(&qp->resp_pkts);
+@@ -338,7 +340,7 @@ static int rxe_qp_init_resp(struct rxe_dev *rxe, struct rxe_qp *qp,
+ 			return err;
+ 	}
  
 -	rxe_init_task(&qp->recv_task, qp, rxe_receiver, 0);
 +	rxe_init_task(&qp->recv_task, qp, rxe_receiver, sched_cpu_hint);
@@ -57,7 +57,7 @@ index cf979ec..8d6f434 100644
 --- a/rxe/rxe_net.c
 +++ b/rxe/rxe_net.c
 @@ -185,7 +185,8 @@ static int rxe_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
- 
+ 	rcv_proc = &rxe->rcv_procs[skb_get_hash(skb) & (RXE_MAX_PROC - 1)];
  	skb_queue_tail(&rcv_proc->skbq, skb);
  
 -	queue_work(rcv_proc->wq, &rcv_proc->work);
@@ -120,9 +120,9 @@ index d33dd6c..f506638 100644
  
 +extern struct workqueue_struct *rxe_wq;
 +
- /* responder states */
- enum resp_states {
- 	RESPST_NONE,
+ void rxe_set_mtu(struct rxe_dev *rxe, unsigned int dev_mtu);
+ 
+ int rxe_add(struct rxe_dev *rxe, unsigned int mtu, const char *ibdev_name,
 diff --git a/rxe/rxe_task.c b/rxe/rxe_task.c
 index b7b4259..4e359b5 100644
 --- a/rxe/rxe_task.c

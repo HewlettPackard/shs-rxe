@@ -15,7 +15,7 @@ index deadffd..374ee14 100644
  
  static inline bool is_crc_stripped(struct rxe_pkt_info *pkt)
  {
--	        return (((skb_shinfo(PKT_TO_SKB(pkt))->flags) & BIT(7)) == BIT(7));
+-	return (((skb_shinfo(PKT_TO_SKB(pkt))->flags) & BIT(7)) == BIT(7));
 +#ifdef SKBTX_ZEROCOPY_FRAG
 +	return (((skb_shinfo(PKT_TO_SKB(pkt))->__unused) & BIT(0)) == BIT(0));
 +#else

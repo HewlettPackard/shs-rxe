@@ -2,181 +2,11 @@ From 6d3cf2aa0c5d467762769b714a1ad0c17fb5651e Mon Sep 17 00:00:00 2001
 From: Bob Pearson <rpearsonhpe@gmail.com>
 Date: Wed, 5 Jul 2023 13:37:32 -0500
 Subject: [PATCH 3/3] RDMA/rxe: Pass qp index instead of qp to rxe_destructor
-
----
- drivers/infiniband/sw/rxe/rxe_net.c | 115 ++++++++++++++++++----------
- drivers/infiniband/sw/rxe/rxe_qp.c  |   1 -
- 2 files changed, 74 insertions(+), 42 deletions(-)
-
-Index: rxe/rxe/rxe_net.c
-===================================================================
---- rxe.orig/rxe/rxe_net.c
-+++ rxe/rxe/rxe_net.c
-@@ -163,25 +163,34 @@ void recv_worker(struct work_struct *wor
- 	struct sk_buff *skb;
- 	int iterations = RXE_MAX_ITERATIONS;
- 
--	while (--iterations > 0) { 
-+	while (--iterations > 0) {
- 		if (!(skb = skb_dequeue(&rcv_proc->skbq)))
- 			break;
- 		udp_encap_recv(rcv_proc->rxe, skb);
- 	}
- }
- 
--static int rxe_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
-+static struct rxe_dev *get_rxe_from_skb(struct sk_buff *skb)
- {
- 	struct rxe_dev *rxe;
- 	struct net_device *ndev = skb->dev;
-+
-+	rxe = rxe_get_dev_from_net(ndev);
-+	if (!rxe && is_vlan_dev(ndev))
-+		rxe = rxe_get_dev_from_net(vlan_dev_real_dev(ndev));
-+
-+	return rxe;
-+}
-+
-+static int rxe_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
-+{
-+	struct rxe_dev *rxe;
- 	struct rcv_proc *rcv_proc;
- 
- 	/* takes a reference on rxe->ib_dev
- 	 * drop when skb is freed
- 	 */
--	rxe = rxe_get_dev_from_net(ndev);
--	if (!rxe && is_vlan_dev(ndev))
--		rxe = rxe_get_dev_from_net(vlan_dev_real_dev(ndev));
-+	rxe = get_rxe_from_skb(skb);
- 	if (!rxe)
- 		goto drop;
- 
-@@ -374,15 +383,37 @@ int rxe_prepare(struct rxe_av *av, struc
- 
- static void rxe_skb_tx_dtor(struct sk_buff *skb)
- {
--	struct sock *sk = skb->sk;
--	struct rxe_qp *qp = sk->sk_user_data;
--	int skb_out = atomic_dec_return(&qp->skb_out);
-+	struct rxe_dev *rxe;
-+	unsigned int index;
-+	struct rxe_qp *qp;
-+	int skb_out;
- 
-+	/* takes a ref on ib device if success */
-+	rxe = get_rxe_from_skb(skb);
-+	if (!rxe)
-+		goto out;
-+
-+	/* recover source qp index from sk->sk_user_data
-+	 * free the reference taken in rxe_send
-+	 */
-+	index = (int)(uintptr_t)skb->sk->sk_user_data;
-+	sock_put(skb->sk);
-+
-+	/* lookup qp from index, takes a ref on success */
-+	qp = rxe_pool_get_index(&rxe->qp_pool, index);
-+	if (!qp)
-+		goto out_put_ibdev;
-+
-+	skb_out = atomic_dec_return(&qp->skb_out);
- 	if (unlikely(qp->need_req_skb &&
- 		     skb_out < inflight_skbs_per_qp_low))
-		rxe_sched_task(&qp->send_task);
- 
- 	rxe_put(qp);
-+out_put_ibdev:
-+	ib_device_put(&rxe->ib_dev);
-+out:
-+	return;
- }
- 
- static bool rxe_neigh_valid(struct neighbour *n)
-@@ -445,6 +476,8 @@ static int rxe_xmit_one(struct sk_buff *
- 
- static int rxe_send(struct sk_buff *skb, struct rxe_pkt_info *pkt, bool xmit_hard)
- {
-+	struct rxe_qp *qp = pkt->qp;
-+	struct sock *sk;
-	struct rxe_dev *rxe = to_rdev(qp->ibqp.device);
- 	int err;
- 	struct netdev_queue *txq;
-@@ -455,10 +488,18 @@ static int rxe_send(struct sk_buff *skb,
- 	bool is_v6gw;
- 	bool packet_requeue;
- 
--	skb->destructor = rxe_skb_tx_dtor;
--	skb->sk = pkt->qp->sk->sk;
-+	/* qp can be destroyed while this packet is waiting on
-+	 * the tx queue. So need to protect sk.
-+	 */
-+	sk = qp->sk->sk;
-+	skb->sk = sk;
-+	sock_hold(sk);
- 
--	rxe_get(pkt->qp);
-+	/* store the qp index in sk->sk_user_data for lookup in
-+	 * the destructor callback.
-+	 */
-+	skb->destructor = rxe_skb_tx_dtor;
-+	sk->sk_user_data = (void *)(long)qp->elem.index;
- 	atomic_inc(&pkt->qp->skb_out);
- 
- 	if (xmit_hard) {
-@@ -558,12 +558,12 @@ static int rxe_send(struct sk_buff *skb, struct rxe_pkt_info *pkt, bool xmit_har
- 	} else {
- ip_out:
-		if (skb->protocol == htons(ETH_P_IP))
--			err = ip_local_out(dev_net(skb_dst(skb)->dev), skb->sk, skb);
-+			err = ip_local_out(dev_net(skb_dst(skb)->dev), sk, skb);
-		else
--			err = ip6_local_out(dev_net(skb_dst(skb)->dev), skb->sk, skb);
-+			err = ip6_local_out(dev_net(skb_dst(skb)->dev), sk, skb);
- 	}
- 
-	return err;
- }
- 
- /* fix up a send packet to match the packets
-Index: rxe/rxe/rxe_qp.c
-===================================================================
---- rxe.orig/rxe/rxe_qp.c
-+++ rxe/rxe/rxe_qp.c
-@@ -192,7 +192,6 @@ static int rxe_qp_init_req(struct rxe_de
- 	err = sock_create_kern(&init_net, AF_INET, SOCK_DGRAM, 0, &qp->sk);
- 	if (err < 0)
- 		return err;
--	qp->sk->sk->sk_user_data = qp;
- 
- 	/* pick a source UDP port number for this QP based on
- 	 * the source QPN. this spreads traffic for different QPs
+Subject:  All except fix for redundant free in error is upstream
 diff --git a/rxe/rxe_net.c b/rxe/rxe_net.c
 index a21fc56..8d80602 100644
 --- a/rxe/rxe_net.c
 +++ b/rxe/rxe_net.c
-@@ -571,14 +571,17 @@ ip_out:
-  */
- static int rxe_loopback(struct sk_buff *skb, struct rxe_pkt_info *pkt)
- {
-+	struct rxe_qp *qp = pkt->qp;
-+	struct sock *sk;
-	struct rxe_pkt_info *newpkt;
--	int err;
-
-	/* make loopback line up with rxe_udp_encap_recv */
--	skb->destructor = rxe_skb_tx_dtor;
--	skb->sk = pkt->qp->sk->sk;
-+	sk = qp->sk->sk;
-+	skb->sk = sk;
-+	sock_hold(sk);
-
--	rxe_get(pkt->qp);
-+	skb->destructor = rxe_skb_tx_dtor;
-+	sk->sk_user_data = (void*)(long)qp->elem.index;
-	atomic_inc(&pkt->qp->skb_out);
-
-	if (skb->protocol == htons(ETH_P_IP))
 @@ -593,8 +596,7 @@ static int rxe_loopback(struct sk_buff *skb, struct rxe_pkt_info *pkt)
 
 	if (WARN_ON(!ib_device_try_get(&pkt->rxe->ib_dev))) {
@@ -187,14 +17,25 @@ index a21fc56..8d80602 100644
 	}
 
 	/* remove udp header */
-@@ -602,10 +604,6 @@ static int rxe_loopback(struct sk_buff *skb, struct rxe_pkt_info *pkt)
-
+@@ -602,9 +604,6 @@ static int rxe_loopback(struct sk_buff *skb, struct rxe_pkt_info *pkt)
 	rxe_udp_encap_recv(NULL, skb);
+
 	return 0;
--
 -drop:
 -	kfree_skb(skb);
 -	return err;
  }
 
  int rxe_xmit_packet(struct rxe_qp *qp, struct rxe_pkt_info *pkt,
+diff --git a/rxe/rxe_net.c b/rxe/rxe_net.c
+index 4d67675..efa92f5 100644
+--- a/rxe/rxe_net.c
++++ b/rxe/rxe_net.c
+@@ -591,7 +591,6 @@ static int rxe_loopback(struct sk_buff *skb, struct rxe_pkt_info *pkt)
+ {
+ 	struct sock *sk = pkt->qp->sk->sk;
+ 	struct rxe_pkt_info *newpkt;
+-	int err;
+ 
+ 	sock_hold(sk);
+ 	skb->sk = sk;

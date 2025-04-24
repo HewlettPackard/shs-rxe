@@ -15,8 +15,8 @@ diff --git a/rxe/rxe_net.c b/rxe/rxe_net.c
 index 0a5076b..ba296dc 100644
 --- a/rxe/rxe_net.c
 +++ b/rxe/rxe_net.c
-@@ -411,9 +411,68 @@ static void rxe_skb_tx_dtor(struct sk_buff *skb)
- 	rxe_put(qp);
+@@ -411,10 +411,70 @@ static void rxe_skb_tx_dtor(struct sk_buff *skb)
+ 	sock_put(skb->sk);
  }
  
 -static int rxe_send(struct sk_buff *skb, struct rxe_pkt_info *pkt)
@@ -72,8 +72,10 @@ index 0a5076b..ba296dc 100644
 +
 +static int rxe_send(struct sk_buff *skb, struct rxe_pkt_info *pkt, bool xmit_hard)
  {
++	struct rxe_qp *qp = pkt->qp;
 +	struct rxe_dev *rxe = to_rdev(qp->ibqp.device);
  	int err;
+	struct sock *sk = pkt->qp->sk->sk;
 +	struct netdev_queue *txq;
 +	struct net_device *dev = skb->dev;
 +	struct ethhdr *eth;
@@ -83,10 +85,10 @@ index 0a5076b..ba296dc 100644
 +	bool is_v6gw;
 +	bool packet_requeue;
  
- 	skb->destructor = rxe_skb_tx_dtor;
- 	skb->sk = pkt->qp->sk->sk;
+ 	sock_hold(sk);
+ 	skb->sk = sk;
 @@ -420,10 +480,78 @@ static int rxe_send(struct sk_buff *skb, struct rxe_pkt_info *pkt)
- 	rxe_get(pkt->qp);
+ 	skb->destructor = rxe_skb_tx_dtor;
  	atomic_inc(&pkt->qp->skb_out);
  
 -	if (skb->protocol == htons(ETH_P_IP))
@@ -185,14 +187,14 @@ index 338915d..13812f3 100644
  		       u32 opcode);
  
 @@ -859,7 +859,7 @@ again:
- 	update_wqe_state(qp, wqe, &pkt);
- 	update_wqe_psn(qp, wqe, &pkt, payload);
+ 		goto err;
+ 	}
  
 -	err = rxe_xmit_packet(qp, &pkt, skb);
 +	err = rxe_xmit_packet(qp, &pkt, skb, xmit_hard);
  	if (err) {
- 		qp->need_req_skb = 1;
- 
+ 		wqe->status = IB_WC_LOC_QP_OP_ERR;
+		goto err; 
 diff --git a/rxe/rxe_resp.c b/rxe/rxe_resp.c
 index 20e3179..0d4a0de 100644
 --- a/rxe/rxe_resp.c
@@ -207,8 +209,8 @@ index 20e3179..0d4a0de 100644
  		state = RESPST_ERR_RNR;
  		goto err_out;
 @@ -1055,7 +1055,7 @@ static int send_common_ack(struct rxe_qp *qp, u8 syndrome, u32 psn,
- 	if (!skb)
- 		return -ENOMEM;
+ 		return err;
+ 	}
  
 -	err = rxe_xmit_packet(qp, &ack_pkt, skb);
 +	err = rxe_xmit_packet(qp, &ack_pkt, skb, false);

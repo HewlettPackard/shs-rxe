@@ -165,11 +165,11 @@ diff --git a/rxe/rxe_verbs.h b/rxe/rxe_verbs.h
 index 80139bf..ee599d3 100644
 --- a/rxe/rxe_verbs.h
 +++ b/rxe/rxe_verbs.h
-@@ -385,6 +385,16 @@ struct rxe_port {
+@@ -410,6 +410,16 @@ struct rxe_port {
  	u32			qp_gsi_index;
  };
-
-+/* Number of parallel workers available for processing. Power of 2. */
+ 
++/* Number of parallel workers available for processing.  Power of 2. */
 +#define RXE_MAX_PROC 8
 +struct rxe_dev;
 +struct rcv_proc {
@@ -179,21 +179,25 @@ index 80139bf..ee599d3 100644
 +	struct rxe_dev *rxe;
 +};
 +
+ #define	RXE_PORT	1
  struct rxe_dev {
  	struct ib_device	ib_dev;
- 	struct ib_device_attr	attr;
 @@ -418,8 +428,12 @@ struct rxe_dev {
+ 	atomic64_t		stats_counters[RXE_NUM_OF_COUNTERS];
 
  	struct rxe_port		port;
- 	struct crypto_shash	*tfm;
 +
 +	struct rcv_proc rcv_procs[RXE_MAX_PROC];
  };
 
 +void recv_worker(struct work_struct *work);
 +
- static inline void rxe_counter_inc(struct rxe_dev *rxe, enum rxe_counters index)
+ static inline struct net_device *rxe_ib_device_get_netdev(struct ib_device *dev)
  {
- 	atomic64_inc(&rxe->stats_counters[index]);
+ 	return ib_device_get_netdev(dev, RXE_PORT);
 --
 2.31.1
+diff --git a/rxe/rxe_verbs.h b/rxe/rxe_verbs.h
+index 535e54f..d159668 100644
+--- a/rxe/rxe_verbs.h
++++ b/rxe/rxe_verbs.h

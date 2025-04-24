@@ -9,6 +9,6 @@ index 72b30e6..5d036eb 100644
 -		if (wqe->status != IB_WC_WR_FLUSH_ERR)
 +		if ((wqe->status != IB_WC_WR_FLUSH_ERR) && 
 +			(wqe->status != IB_WC_RETRY_EXC_ERR))
- 			rxe_err_qp(qp, "non-flush error status = %d",
+ 			rxe_err_qp(qp, "non-flush error status = %d\n",
  				wqe->status);
  	}

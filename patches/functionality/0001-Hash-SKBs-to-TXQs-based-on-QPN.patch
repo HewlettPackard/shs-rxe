@@ -30,7 +30,7 @@ index ffc84a7..e1613a5 100644
 +
  static struct rxe_recv_sockets recv_sockets;
  
- static struct dst_entry *rxe_find_route4(struct net_device *ndev,
+ static struct dst_entry *rxe_find_route4(struct rxe_qp *qp,
 @@ -444,6 +448,14 @@ static bool rxe_neigh_valid(struct neighbour *n)
  	return true;
  }

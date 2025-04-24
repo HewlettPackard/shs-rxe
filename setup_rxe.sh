@@ -27,6 +27,7 @@ cleanup_and_fail() {
 }
 
 RXE_TARGET=${RXE_TARGET:="UNKNOWN"}
+distro="sles"
 
 if [[ "${RXE_TARGET}" == "UNKNOWN" ]]; then
 	if [[ -f /etc/os-release ]]; then
@@ -36,32 +37,39 @@ if [[ "${RXE_TARGET}" == "UNKNOWN" ]]; then
 	fi
 	# SLES15 returns a string with quotes for whatever reason.
 	if [[ "$rel" = "SUSE Linux Enterprise Server 15 SP4" ]]; then
+		distro="sles"
 		RXE_TARGET=SLES_15_SP4
 	elif [[ "$rel" = "SUSE Linux Enterprise Server 15 SP5" ]]; then
+		distro="sles"
 		RXE_TARGET=SLES_15_SP5
 	elif [[ "$rel" = "Rocky Linux 9.2 (Blue Onyx)" ]]; then
+		distro="rocky"
 		RXE_TARGET=ROCKY_9_2
 	elif [[ "$rel" = "Red Hat Enterprise Linux 9.4 (Plow)" ]]; then
+		distro="rhel"
 		RXE_TARGET=RHEL_9_4
 	else
 	    cleanup_and_fail "Unrecognized target $rel, set RXE_TARGET"
 	fi
 fi
 
-tarball=rxe-6.3.tar.gz
+tarball=rxe-6.13.tar.gz
+
+compatibility_files="${distro}/${distro}.series"
 
 if [[ "${RXE_TARGET}" = "SLES_15_SP4" ]]; then
     export QUILT_SERIES=SLES-15-SP4.series
-    compatibility_files="common.series sles15_sp5_compatibility.series sles15_sp4_compatibility.series"
+    compatibility_files="${compatibility_files} ${distro}/sles15_sp5_compatibility.series"
+    compatibility_files="${compatibility_files} ${distro}/sles15_sp4_compatibility.series"
 elif [[ "${RXE_TARGET}" = "SLES_15_SP5" ]]; then
     export QUILT_SERIES=SLES-15-SP5.series
-    compatibility_files="common.series sles15_sp5_compatibility.series"
+    compatibility_files="${compatibility_files} ${distro}/sles15_sp5_compatibility.series"
 elif [[ "${RXE_TARGET}" = "ROCKY_9_2" ]]; then
     export QUILT_SERIES=ROCKY_9_2.series
-    compatibility_files="common.series rocky9.2_compatibility.series"
+    compatibility_files="${compatibility_files} ${distro}/rocky9.2_compatibility.series"
 elif [[ "${RXE_TARGET}" = "RHEL_9_4" ]]; then
     export QUILT_SERIES=RHEL_9_4.series
-    compatibility_files=""
+    compatibility_files="${compatibility_files}"
 elif [[ "${RXE_TARGET}" = "RXE_DEVEL" ]]; then
     export QUILT_SERIES=RXE_DEVEL.series
     compatibility_files=""

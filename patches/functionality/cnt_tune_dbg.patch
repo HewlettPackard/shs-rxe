@@ -11,9 +11,9 @@ index ae466e72fc43..f56dca8a94f1 100644
  #include <rdma/rdma_netlink.h>
  #include <net/addrconf.h>
  #include "rxe.h"
-@@ -13,6 +15,34 @@ MODULE_AUTHOR("Bob Pearson, Frank Zago, John Groves, Kamal Heib");
- MODULE_DESCRIPTION("Soft RDMA transport");
- MODULE_LICENSE("Dual BSD/GPL");
+@@ -18,6 +18,34 @@ bool rxe_use_sg = true;
+ module_param_named(use_sg, rxe_use_sg, bool, 0644);
+ MODULE_PARM_DESC(use_sg, "Support skb frags; default true");
  
 +int max_pkt_per_ack = RXE_MAX_PKT_PER_ACK;
 +module_param(max_pkt_per_ack, int, 0644);
@@ -62,7 +62,7 @@ index d8fb2c7af30a..b817124ed133 100644
 +extern int max_iterations;
 +extern bool dump_qp_on_error;
 +
- #define rxe_dbg(fmt, ...) pr_debug("%s: " fmt "\n", __func__, ##__VA_ARGS__)
+ #define rxe_dbg(fmt, ...) pr_debug("%s: " fmt, __func__, ##__VA_ARGS__)
  #define rxe_dbg_dev(rxe, fmt, ...) ibdev_dbg(&(rxe)->ib_dev,		\
  		"%s: " fmt, __func__, ##__VA_ARGS__)
 diff --git a/drivers/infiniband/sw/rxe/rxe_hw_counters.c b/drivers/infiniband/sw/rxe/rxe_hw_counters.c
@@ -103,12 +103,11 @@ diff --git a/drivers/infiniband/sw/rxe/rxe_net.c b/drivers/infiniband/sw/rxe/rxe
 index cd59666158b1..97ed77fa8219 100644
 --- a/drivers/infiniband/sw/rxe/rxe_net.c
 +++ b/drivers/infiniband/sw/rxe/rxe_net.c
-@@ -350,7 +350,7 @@ static void rxe_skb_tx_dtor(struct sk_buff *skb)
- 	int skb_out = atomic_dec_return(&qp->skb_out);
+@@ -350,6 +350,6 @@ static void rxe_skb_tx_dtor(struct sk_buff *skb)
  
- 	if (unlikely(qp->need_req_skb &&
--		     skb_out < RXE_INFLIGHT_SKBS_PER_QP_LOW))
-+		     skb_out < inflight_skbs_per_qp_low))
+ 	skb_out = atomic_dec_return(&qp->skb_out);
+-	if (qp->need_req_skb && skb_out < RXE_INFLIGHT_SKBS_PER_QP_LOW)
++	if (qp->need_req_skb && (skb_out < inflight_skbs_per_qp_low))
 		rxe_sched_task(&qp->send_task);
  
  	rxe_put(qp);
@@ -124,33 +123,16 @@ diff --git a/drivers/infiniband/sw/rxe/rxe_req.c b/drivers/infiniband/sw/rxe/rxe
 index d8c41fd626a9..54fc9e02f0a5 100644
 --- a/drivers/infiniband/sw/rxe/rxe_req.c
 +++ b/drivers/infiniband/sw/rxe/rxe_req.c
-@@ -46,6 +46,7 @@ static void req_retry(struct rxe_qp *qp)
- 	unsigned int cons;
- 	unsigned int prod;
+@@ -442,7 +442,7 @@ static void rxe_init_roce_hdrs(struct rxe_qp *qp, struct rxe_send_wqe *wqe,
  
-+	rxe_dbg_qp(qp, "called\n");
- 	cons = queue_get_consumer(q, QUEUE_TYPE_FROM_CLIENT);
- 	prod = queue_get_producer(q, QUEUE_TYPE_FROM_CLIENT);
- 
-@@ -101,7 +102,7 @@ void rnr_nak_timer(struct timer_list *t)
- 	struct rxe_qp *qp = from_timer(qp, t, rnr_nak_timer);
- 	unsigned long flags;
- 
--	rxe_dbg_qp(qp, "nak timer fired\n");
-+	rxe_info_qp(qp, "nak timer fired\n");
- 
- 	spin_lock_irqsave(&qp->state_lock, flags);
- 	if (qp->valid) {
-@@ -444,7 +444,7 @@ static void rxe_init_roce_hdrs(struct rxe_qp *qp, struct rxe_send_wqe *wqe,
- 		    (is_send || is_write_imm);
- 	dst_qpn = (pkt->mask & RXE_DETH_MASK) ? wr->wr.ud.remote_qpn :
- 					       qp->attr.dest_qp_num;
--	ack_req = is_end || (qp->req.noack_pkts++ > RXE_MAX_PKT_PER_ACK);
-+	ack_req = is_end || (qp->req.noack_pkts++ > max_pkt_per_ack);
+ 	if (qp_type(qp) != IB_QPT_UD && qp_type(qp) != IB_QPT_UC)
+ 		ack_req = ((pkt->mask & RXE_END_MASK) ||
+-			   (qp->req.noack_pkts++ > RXE_MAX_PKT_PER_ACK));
++			   (qp->req.noack_pkts++ > max_pkt_per_ack));
  	if (ack_req)
  		qp->req.noack_pkts = 0;
  
-@@ -728,6 +729,7 @@ int rxe_requester(struct rxe_qp *qp)
+@@ -824,6 +824,7 @@ again:
  
  	if (rxe_wqe_is_fenced(qp, wqe)) {
  		qp->req.wait_fence = 1;
@@ -158,7 +140,7 @@ index d8c41fd626a9..54fc9e02f0a5 100644
  		goto exit;
  	}
  
-@@ -741,15 +743,17 @@ int rxe_requester(struct rxe_qp *qp)
+@@ -837,15 +838,17 @@ again:
  
  	if (unlikely(qp_type(qp) == IB_QPT_RC &&
  		psn_compare(qp->req.psn, (qp->comp.psn +
@@ -178,7 +160,7 @@ index d8c41fd626a9..54fc9e02f0a5 100644
  		goto exit;
  	}
  
-@@ -762,8 +766,10 @@ int rxe_requester(struct rxe_qp *qp)
+@@ -858,8 +861,10 @@ again:
  	mask = rxe_opcode[opcode].mask;
  	if (unlikely(mask & (RXE_READ_OR_ATOMIC_MASK |
  			RXE_ATOMIC_WRITE_MASK))) {

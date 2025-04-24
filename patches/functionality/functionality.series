@@ -1,3 +1,23 @@
+functionality/0001-RDMA-rxe-Add-pad-size-to-struct-rxe_pkt_info.patch -p4
+functionality/0002-RDMA-rxe-Isolate-code-to-fill-request-roce-headers.patch -p1
+functionality/0003-RDMA-rxe-Isolate-request-payload-code-in-a-subroutin.patch -p4
+functionality/0004-RDMA-rxe-Remove-paylen-parameter-from-rxe_init_packe.patch -p4
+functionality/0005-RDMA-rxe-Isolate-code-to-build-request-packet.patch -p4
+functionality/0006-RDMA-rxe-Put-fake-udp-send-code-in-a-subroutine.patch -p4
+functionality/0007-RDMA-rxe-Combine-setting-pkt-info.patch -p4
+functionality/0009-RDMA-rxe-Extend-rxe_mr_copy-to-support-skb-frags.patch -p4
+functionality/0010-RDMA-rxe-Extend-copy_data-to-support-skb-frags.patch -p4
+functionality/0011-RDMA-rxe-Extend-rxe_init_packet-to-support-frags.patch -p4
+functionality/0012-RDMA-rxe-Extend-rxe_icrc.c-to-support-frags.patch -p4
+functionality/0013-RDMA-rxe-Extend-rxe_init_req_packet-for-frags.patch -p4
+functionality/0014-RDMA-rxe-Extend-response-packets-for-frags.patch -p4
+functionality/0015-RDMA-rxe-Extend-send-write_data_in-for-frags.patch -p4
+functionality/0016-RDMA-rxe-Extend-do_read-in-rxe_comp.c-for-frags.patch -p4
+functionality/0017-RDMA-rxe-Enable-sg-code-in-rxe.patch -p4
+functionality/0018-RDMA-rxe-Optimize-mr-lookup-in-send-path.patch -p4
+
+functionality/0012-RDMA-rxe-Fix-multiple-rxe_qp_error-calls.patch -p4
+
 functionality/NETCASSINI-3738fix.patch -p1
 
 functionality/cray_ver.patch -p 1
@@ -10,13 +30,13 @@ functionality/rxe_cassini_roce_seg.patch -p 2
 functionality/rxe_cassini_xmit_hard.patch -p1
 
 functionality/0001-Hash-SKBs-to-TXQs-based-on-QPN.patch -p1
-functionality/0001-Rework-rxe_init_packet.patch -p1
 functionality/fix_logging.patch -p1
 
 functionality/0001-Use-the-skb-hash-to-spread-the-received-packets-over.patch -p1
 functionality/0005-Include-CPU-sched-hint-in-RXE-init.patch
 functionality/0006-Set-RXE-CQ-comp_vector.patch
 functionality/0007-Define-QP-task-sched-CPU.patch
+#functionality/0001-Steer-RX-packet-to-core-QP-processing-is-done-on.patch -p1
 
 functionality/0002-RDMA-rxe-Change-rxe_cleanup-to-void.patch -p1
 functionality/0003-RDMA-rxe-Pass-qp-index-instead-of-qp-to-rxe_destruct.patch -p1

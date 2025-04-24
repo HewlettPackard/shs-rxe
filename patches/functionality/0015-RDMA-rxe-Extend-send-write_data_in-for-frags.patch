@@ -1,0 +1,141 @@
+From e895248dbcb647aa2b2415498526ecf910142714 Mon Sep 17 00:00:00 2001
+From: Bob Pearson <rpearsonhpe@gmail.com>
+Date: Fri, 14 Jul 2023 11:43:19 -0500
+Subject: [PATCH 15/18] RDMA/rxe: Extend send/write_data_in() for frags
+
+Extend send_data_in() and write_data_in() in rxe_resp.c to
+support fragmented received skbs.
+
+This is in preparation for using fragmented skbs.
+
+Signed-off-by: Bob Pearson <rpearsonhpe@gmail.com>
+---
+ drivers/infiniband/sw/rxe/rxe_resp.c | 104 +++++++++++++++++----------
+ 1 file changed, 66 insertions(+), 38 deletions(-)
+
+diff --git a/drivers/infiniband/sw/rxe/rxe_resp.c b/drivers/infiniband/sw/rxe/rxe_resp.c
+index dc62e11dc448..fc959bacb906 100644
+--- a/drivers/infiniband/sw/rxe/rxe_resp.c
++++ b/drivers/infiniband/sw/rxe/rxe_resp.c
+@@ -562,45 +562,70 @@ err:
+ 	return state;
+ }
+ 
+-static enum resp_states send_data_in(struct rxe_qp *qp, void *data_addr,
+-				     int data_len)
++static enum resp_states send_data_in(struct rxe_qp *qp, struct rxe_pkt_info *pkt)
+ {
+-	struct sk_buff *skb = NULL;
++	struct sk_buff *skb = PKT_TO_SKB(pkt);
++	int nr_frags = skb_shinfo(skb)->nr_frags;
++	u8 *data_addr = payload_addr(pkt);
++	int data_len = payload_size(pkt);
++	union rdma_network_hdr hdr;
++	enum rxe_mr_copy_dir dir;
+ 	int skb_offset = 0;
+ 	int err;
+ 
++	/* Per IBA for UD packets copy the IP header into the receive buffer */
++	if (qp_type(qp) == IB_QPT_UD || qp_type(qp) == IB_QPT_GSI) {
++		if (skb->protocol == htons(ETH_P_IP)) {
++			memset(&hdr.reserved, 0, sizeof(hdr.reserved));
++			memcpy(&hdr.roce4grh, ip_hdr(skb), sizeof(hdr.roce4grh));
++		} else {
++			memcpy(&hdr.ibgrh, ipv6_hdr(skb), sizeof(hdr));
++		}
++		err = copy_data(skb, qp->pd, IB_ACCESS_LOCAL_WRITE,
++				&qp->resp.wqe->dma, &hdr, skb_offset,
++				sizeof(hdr), RXE_TO_MR_OBJ);
++		if (err)
++			goto err_out;
++	}
++
++	dir = nr_frags ? RXE_FRAG_TO_MR : RXE_TO_MR_OBJ;
++	/* offset to payload from skb->data (= &bth header) */
++	skb_offset = rxe_opcode[pkt->opcode].length;
+ 	err = copy_data(skb, qp->pd, IB_ACCESS_LOCAL_WRITE,
+ 			&qp->resp.wqe->dma, data_addr,
+-			skb_offset, data_len, RXE_TO_MR_OBJ);
++			skb_offset, data_len, dir);
++
+ 	if (unlikely(err))
+-		return (err == -ENOSPC) ? RESPST_ERR_LENGTH
+-					: RESPST_ERR_MALFORMED_WQE;
++		goto err_out;
+ 
+ 	return RESPST_NONE;
++
++err_out:
++	return (err == -ENOSPC) ? RESPST_ERR_LENGTH : RESPST_ERR_MALFORMED_WQE;
+ }
+ 
+ static enum resp_states write_data_in(struct rxe_qp *qp,
+ 				      struct rxe_pkt_info *pkt)
+ {
+ 	struct sk_buff *skb = PKT_TO_SKB(pkt);
+-	enum resp_states rc = RESPST_NONE;
++	int nr_frags = skb_shinfo(skb)->nr_frags;
++	u8 *data_addr = payload_addr(pkt);
+ 	int data_len = payload_size(pkt);
++	enum rxe_mr_copy_dir dir;
+ 	int err;
+-	int skb_offset = 0;
++	unsigned int skb_offset = 0;
+ 
++	dir = nr_frags ? RXE_FRAG_TO_MR : RXE_TO_MR_OBJ;
++	skb_offset = rxe_opcode[pkt->opcode].length;
+ 	err = rxe_mr_copy(skb, qp->resp.mr, qp->resp.va + qp->resp.offset,
+-			  payload_addr(pkt), skb_offset, data_len,
+-			  RXE_TO_MR_OBJ);
+-	if (err) {
+-		rc = RESPST_ERR_RKEY_VIOLATION;
+-		goto out;
+-	}
++			  data_addr, skb_offset, data_len, dir);
++	if (err)
++		return RESPST_ERR_RKEY_VIOLATION;
+ 
+ 	qp->resp.va += data_len;
+ 	qp->resp.resid -= data_len;
+ 
+-out:
+-	return rc;
++	return RESPST_NONE;
+ }
+ 
+ static struct resp_res *rxe_prepare_res(struct rxe_qp *qp,
+@@ -991,30 +1036,13 @@ static int invalidate_rkey(struct rxe_qp *qp, u32 rkey)
+ static enum resp_states execute(struct rxe_qp *qp, struct rxe_pkt_info *pkt)
+ {
+ 	enum resp_states err;
+-	struct sk_buff *skb = PKT_TO_SKB(pkt);
+-	union rdma_network_hdr hdr;
+ 
+ 	if (pkt->mask & RXE_SEND_MASK) {
+-		if (qp_type(qp) == IB_QPT_UD ||
+-		    qp_type(qp) == IB_QPT_GSI) {
+-			if (skb->protocol == htons(ETH_P_IP)) {
+-				memset(&hdr.reserved, 0,
+-						sizeof(hdr.reserved));
+-				memcpy(&hdr.roce4grh, ip_hdr(skb),
+-						sizeof(hdr.roce4grh));
+-				err = send_data_in(qp, &hdr, sizeof(hdr));
+-			} else {
+-				err = send_data_in(qp, ipv6_hdr(skb),
+-						sizeof(hdr));
+-			}
+-			if (err)
+-				return err;
+-		}
+-		err = send_data_in(qp, payload_addr(pkt), payload_size(pkt));
++		err = send_data_in(qp, pkt);
+ 		if (err)
+ 			return err;
+ 	} else if (pkt->mask & RXE_WRITE_MASK) {
+-		err = write_data_in(qp, pkt);
++		err = write_data_in(qp, pkt);
+ 		if (err)
+ 			return err;
+ 	} else if (pkt->mask & RXE_READ_MASK) {
+-- 
+2.39.2

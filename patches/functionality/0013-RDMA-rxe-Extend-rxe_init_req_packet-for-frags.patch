@@ -1,0 +1,177 @@
+From 7c6770ce53f92f11ab4b91446f3ee126c47243d1 Mon Sep 17 00:00:00 2001
+From: Bob Pearson <rpearsonhpe@gmail.com>
+Date: Tue, 11 Jul 2023 15:38:28 -0500
+Subject: [PATCH 13/17] RDMA/rxe: Extend rxe_init_req_packet() for frags
+
+Add code to rxe_build_req_packet() to allocate space for the
+pad and icrc if the skb is fragmented.
+
+Signed-off-by: Bob Pearson <rpearsonhpe@gmail.com>
+---
+ drivers/infiniband/sw/rxe/rxe_loc.h    |  5 ++
+ drivers/infiniband/sw/rxe/rxe_opcode.c |  2 +
+ drivers/infiniband/sw/rxe/rxe_req.c    | 88 ++++++++++++++++++++++----
+ 4 files changed, 88 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/infiniband/sw/rxe/rxe_loc.h b/drivers/infiniband/sw/rxe/rxe_loc.h
+index 96b1fb79610a..40624de62288 100644
+--- a/drivers/infiniband/sw/rxe/rxe_loc.h
++++ b/drivers/infiniband/sw/rxe/rxe_loc.h
+@@ -173,6 +173,10 @@ void rxe_srq_cleanup(struct rxe_pool_elem *elem);
+ 
+ void rxe_dealloc(struct ib_device *ib_dev);
+ 
++/* rxe_req.c */
++int rxe_prepare_pad_icrc(struct rxe_pkt_info *pkt, struct sk_buff *skb,
++			 int payload, bool frag);
++
+ int rxe_completer(struct rxe_qp *qp);
+ int rxe_requester(struct rxe_qp *qp);
+ int rxe_sender(struct rxe_qp *qp);
+diff --git a/drivers/infiniband/sw/rxe/rxe_opcode.c b/drivers/infiniband/sw/rxe/rxe_opcode.c
+index 5c0d5c6ffda4..273b62974c67 100644
+--- a/drivers/infiniband/sw/rxe/rxe_opcode.c
++++ b/drivers/infiniband/sw/rxe/rxe_opcode.c
+@@ -399,6 +399,8 @@ struct rxe_opcode_info rxe_opcode[RXE_NUM_OPCODE] = {
+ 			[RXE_BTH]	= 0,
+ 			[RXE_FETH]	= RXE_BTH_BYTES,
+ 			[RXE_RETH]	= RXE_BTH_BYTES + RXE_FETH_BYTES,
++			[RXE_PAYLOAD]	= RXE_BTH_BYTES + RXE_FETH_BYTES +
++					  RXE_RETH_BYTES,
+ 		}
+ 	},
+ 	[IB_OPCODE_RC_ATOMIC_WRITE]                        = {
+diff --git a/drivers/infiniband/sw/rxe/rxe_req.c b/drivers/infiniband/sw/rxe/rxe_req.c
+index 6882539c20c7..51e627e3d0be 100644
+--- a/drivers/infiniband/sw/rxe/rxe_req.c
++++ b/drivers/infiniband/sw/rxe/rxe_req.c
+@@ -480,26 +480,71 @@ static void rxe_init_roce_hdrs(struct rxe_qp *qp, struct rxe_send_wqe *wqe,
+ 
+ static int rxe_init_payload(struct rxe_qp *qp, struct rxe_send_wqe *wqe,
+ 			    struct rxe_pkt_info *pkt, u32 payload,
+-			    struct sk_buff *skb)
++			    struct sk_buff *skb, bool frag)
+ {
+ 	int skb_offset = 0;
+ 	void *data;
+ 	int err = 0;
++	int len = skb_tailroom(skb);
++	int tot_len = payload + pkt->pad + RXE_ICRC_SIZE;
++	int dir;
++	void *addr;
+ 
+ 	if (wqe->wr.send_flags & IB_SEND_INLINE) {
++		if (WARN_ON(frag)) {
++			rxe_err_qp(qp, "inline data for fragmented skb not supported");
++			return -EINVAL;
++		}
++		if (len < tot_len) {
++			rxe_err_qp(qp, "skb_too_small");
++			return -EINVAL;
++		}
+ 		data = &wqe->dma.inline_data[wqe->dma.sge_offset];
+ 		memcpy(payload_addr(pkt), data, payload);
+ 		wqe->dma.resid -= payload;
+ 		wqe->dma.sge_offset += payload;
+ 	} else {
++		dir = frag ? RXE_FRAG_FROM_MR : RXE_FROM_MR_OBJ;
++		addr = frag ? NULL : payload_addr(pkt);
+ 		err = copy_data(skb, qp->pd, 0, &wqe->dma,
+-				payload_addr(pkt), skb_offset,
+-				payload, RXE_FROM_MR_OBJ);
++				addr, skb_offset, payload, dir);
+ 	}
+ 
+ 	return err;
+ }
+ 
++int rxe_prepare_pad_icrc(struct rxe_pkt_info *pkt, struct sk_buff *skb,
++			 int payload, bool frag)
++{
++	unsigned int length = RXE_ICRC_SIZE + pkt->pad;
++	unsigned int offset;
++	struct page *page;
++	u64 iova;
++	u8 *addr;
++
++	if (frag) {
++		addr = skb_end_pointer(skb) - length;
++		iova = (uintptr_t)addr;
++		page = virt_to_page(iova);
++		offset = iova & (PAGE_SIZE - 1);
++
++		/* make sure we have enough room and frag
++		 * doesn't cross page boundary should never
++		 * happen
++		 */
++		if (WARN_ON(((skb->end - skb->tail) <= length) ||
++			((offset + length) > PAGE_SIZE)))
++			return -ENOMEM;
++
++		memset(addr, 0, length);
++		return rxe_add_frag(skb, NULL, page, length, offset);
++	}
++
++	addr = payload_addr(pkt) + payload;
++	memset(addr, 0, length);
++	return 0;
++}
++
+ static struct sk_buff *rxe_init_req_packet(struct rxe_qp *qp,
+ 					   struct rxe_send_wqe *wqe,
+ 					   int opcode, u32 payload,
+@@ -509,7 +555,7 @@ static struct sk_buff *rxe_init_req_packet(struct rxe_qp *qp,
+ 	struct sk_buff		*skb = NULL;
+ 	struct rxe_av		*av;
+ 	struct rxe_ah		*ah = NULL;
+-	u8			*pad_addr;
++	bool			frag = false;
+ 	int			err;
+ 
+ 	pkt->rxe = rxe;
+@@ -543,9 +600,13 @@ static struct sk_buff *rxe_init_req_packet(struct rxe_qp *qp,
+ 
+ 	/* init payload if any */
+ 	if (pkt->mask & RXE_WRITE_OR_SEND_MASK) {
+-		err = rxe_init_payload(qp, wqe, pkt, payload, skb);
+-		if (unlikely(err))
++		err = rxe_init_payload(qp, wqe, pkt, payload,
++				       skb, frag);
++		if (unlikely(err)) {
++			rxe_dbg_qp(qp, "rxe_init_payload failed, err = %d",
++				   err);
+ 			goto err_out;
++		}
+ 	} else if (pkt->mask & RXE_FLUSH_MASK) {
+ 		/* oA19-2: shall have no payload. */
+ 		wqe->dma.resid = 0;
+@@ -557,9 +618,11 @@ static struct sk_buff *rxe_init_req_packet(struct rxe_qp *qp,
+ 	}
+ 
+ 	/* init pad and icrc */
+-	if (pkt->pad) {
+-		pad_addr = payload_addr(pkt) + payload;
+-		memset(pad_addr, 0, pkt->pad);
++	err = rxe_prepare_pad_icrc(pkt, skb, payload, frag);
++	if (unlikely(err)) {
++		rxe_dbg_qp(qp, "rxe_prepare_pad_icrc failed, err = %d",
++			   err);
++		goto err_out;
+ 	}
+ 
+ 	/* init IP and UDP network headers */
+@@ -837,8 +900,11 @@ int rxe_requester(struct rxe_qp *qp)
+ 	}
+ 
+ 	skb = rxe_init_req_packet(qp, wqe, opcode, payload, &pkt);
+-	if (unlikely(!skb))
++	if (unlikely(!skb)) {
++		rxe_err_qp(qp, "failed to create packet for %s",
++				rxe_opcode[opcode].name);
+ 		goto err;
++	}
+ 
+ 	err = rxe_xmit_packet(qp, &pkt, skb);
+ 	if (err) {
+-- 
+2.39.2

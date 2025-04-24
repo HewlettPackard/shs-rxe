@@ -9,7 +9,7 @@
  #define RXE_POOL_ALIGN		(16)
  
  static const struct rxe_type_info {
-@@ -171,15 +171,16 @@ static void rxe_elem_release(struct kref *kref)
+@@ -171,14 +171,15 @@ static void rxe_elem_release(struct kref *kref)
  {
  	struct rxe_pool_elem *elem = container_of(kref, typeof(*elem), ref_cnt);
  
@@ -22,7 +22,6 @@
  {
  	struct rxe_pool *pool = elem->pool;
  	struct xarray *xa = &pool->xa;
- 	static int timeout = RXE_POOL_TIMEOUT;
 -	int ret, err = 0;
 +	unsigned long until;
 +	int ret;
@@ -33,17 +32,17 @@
  	 * return to rdma-core
  	 */
  	if (sleepable) {
--		if (!completion_done(&elem->complete) && timeout) {
-+		while (!completion_done(&elem->complete) && timeout) {
+-		if (!completion_done(&elem->complete)) {
++		while (!completion_done(&elem->complete)) {
  			ret = wait_for_completion_timeout(&elem->complete,
- 					timeout);
+ 					msecs_to_jiffies(50000));
  
  			WARN_ON(!ret);
  			if (!kref_read(&elem->ref_cnt))
  				break;
  		}
  	} else {
--		unsigned long until = jiffies + timeout;
+-		unsigned long until = jiffies + RXE_POOL_TIMEOUT;
 -
  		/* AH objects are unique in that the destroy_ah verb
  		 * can be called in atomic context. This delay
@@ -55,9 +54,9 @@
 -			mdelay(1);
 -
 -		if (WARN_ON(!completion_done(&elem->complete)))
--			err = -EINVAL;
-+		while (!completion_done(&elem->complete) && timeout) {
-+			until = jiffies + timeout;
+-			err = -ETIMEDOUT;
++		while (!completion_done(&elem->complete)) {
++			until = jiffies + RXE_POOL_TIMEOUT;
 +			while (!completion_done(&elem->complete) &&
 +			       time_before(jiffies, until)) {
 +				mdelay(10);
@@ -100,7 +99,7 @@ Index: rxe/rxe/rxe_verbs.c
  
 -	err = rxe_cleanup(uc);
 -	if (err)
--		rxe_err_uc(uc, "cleanup failed, err = %d", err);
+-		rxe_err_uc(uc, "cleanup failed, err = %d\n", err);
 +	rxe_cleanup(uc);
  }
  
@@ -113,7 +112,7 @@ Index: rxe/rxe/rxe_verbs.c
  
 -	err = rxe_cleanup(pd);
 -	if (err)
--		rxe_err_pd(pd, "cleanup failed, err = %d", err);
+-		rxe_err_pd(pd, "cleanup failed, err = %d\n", err);
 +	rxe_cleanup(pd);
  
  	return 0;
@@ -133,10 +132,10 @@ Index: rxe/rxe/rxe_verbs.c
  err_cleanup:
 -	cleanup_err = rxe_cleanup(ah);
 -	if (cleanup_err)
--		rxe_err_ah(ah, "cleanup failed, err = %d", cleanup_err);
+-		rxe_err_ah(ah, "cleanup failed, err = %d\n", cleanup_err);
 +	rxe_cleanup(ah);
  err_out:
- 	rxe_err_ah(ah, "returned err = %d", err);
+ 	rxe_err_ah(ah, "returned err = %d\n", err);
  	return err;
 @@ -354,11 +346,8 @@ static int rxe_query_ah(struct ib_ah *ib
  static int rxe_destroy_ah(struct ib_ah *ibah, u32 flags)
@@ -146,7 +145,7 @@ Index: rxe/rxe/rxe_verbs.c
  
 -	err = rxe_cleanup_ah(ah, flags & RDMA_DESTROY_AH_SLEEPABLE);
 -	if (err)
--		rxe_err_ah(ah, "cleanup failed, err = %d", err);
+-		rxe_err_ah(ah, "cleanup failed, err = %d\n", err);
 +	rxe_cleanup_ah(ah, flags & RDMA_DESTROY_AH_SLEEPABLE);
  
  	return 0;
@@ -167,10 +166,10 @@ Index: rxe/rxe/rxe_verbs.c
  err_cleanup:
 -	cleanup_err = rxe_cleanup(srq);
 -	if (cleanup_err)
--		rxe_err_srq(srq, "cleanup failed, err = %d", cleanup_err);
+-		rxe_err_srq(srq, "cleanup failed, err = %d\n", cleanup_err);
 +	rxe_cleanup(srq);
  err_out:
- 	rxe_err_dev(rxe, "returned err = %d", err);
+ 	rxe_err_dev(rxe, "returned err = %d\n", err);
  	return err;
 @@ -514,11 +501,8 @@ static int rxe_post_srq_recv(struct ib_s
  static int rxe_destroy_srq(struct ib_srq *ibsrq, struct ib_udata *udata)
@@ -180,7 +179,7 @@ Index: rxe/rxe/rxe_verbs.c
  
 -	err = rxe_cleanup(srq);
 -	if (err)
--		rxe_err_srq(srq, "cleanup failed, err = %d", err);
+-		rxe_err_srq(srq, "cleanup failed, err = %d\n", err);
 +	rxe_cleanup(srq);
  
  	return 0;
@@ -200,10 +199,10 @@ Index: rxe/rxe/rxe_verbs.c
  err_cleanup:
 -	cleanup_err = rxe_cleanup(qp);
 -	if (cleanup_err)
--		rxe_err_qp(qp, "cleanup failed, err = %d", cleanup_err);
+-		rxe_err_qp(qp, "cleanup failed, err = %d\n", cleanup_err);
 +	rxe_cleanup(qp);
  err_out:
- 	rxe_err_dev(rxe, "returned err = %d", err);
+ 	rxe_err_dev(rxe, "returned err = %d\n", err);
  	return err;
 @@ -648,9 +630,7 @@ static int rxe_destroy_qp(struct ib_qp *
  		goto err_out;
@@ -211,7 +210,7 @@ Index: rxe/rxe/rxe_verbs.c
  
 -	err = rxe_cleanup(qp);
 -	if (err)
--		rxe_err_qp(qp, "cleanup failed, err = %d", err);
+-		rxe_err_qp(qp, "cleanup failed, err = %d\n", err);
 +	rxe_cleanup(qp);
  
  	return 0;
@@ -231,10 +230,10 @@ Index: rxe/rxe/rxe_verbs.c
  err_cleanup:
 -	cleanup_err = rxe_cleanup(cq);
 -	if (cleanup_err)
--		rxe_err_cq(cq, "cleanup failed, err = %d", cleanup_err);
+-		rxe_err_cq(cq, "cleanup failed, err = %d\n", cleanup_err);
 +	rxe_cleanup(cq);
  err_out:
- 	rxe_err_dev(rxe, "returned err = %d", err);
+ 	rxe_err_dev(rxe, "returned err = %d\n", err);
  	return err;
 @@ -1206,9 +1184,7 @@ static int rxe_destroy_cq(struct ib_cq *
  		goto err_out;
@@ -242,7 +241,7 @@ Index: rxe/rxe/rxe_verbs.c
  
 -	err = rxe_cleanup(cq);
 -	if (err)
--		rxe_err_cq(cq, "cleanup failed, err = %d", err);
+-		rxe_err_cq(cq, "cleanup failed, err = %d\n", err);
 +	rxe_cleanup(cq);
  
  	return 0;
@@ -254,19 +253,19 @@ Index: rxe/rxe/rxe_verbs.c
 -	int err, cleanup_err;
 +	int err;
  
- 	mr = kzalloc(sizeof(*mr), GFP_KERNEL);
- 	if (!mr)
+ 	if (access & ~RXE_ACCESS_SUPPORTED_MR) {
+ 		rxe_err_pd(pd, "access = %#x not supported (%#x)\n", access,
 @@ -1282,9 +1258,7 @@ static struct ib_mr *rxe_reg_user_mr(str
  	return &mr->ibmr;
  
  err_cleanup:
 -	cleanup_err = rxe_cleanup(mr);
 -	if (cleanup_err)
--		rxe_err_mr(mr, "cleanup failed, err = %d", cleanup_err);
+-		rxe_err_mr(mr, "cleanup failed, err = %d\n", cleanup_err);
 +	rxe_cleanup(mr);
  err_free:
  	kfree(mr);
- 	rxe_err_pd(pd, "returned err = %d", err);
+ 	rxe_err_pd(pd, "returned err = %d\n", err);
 @@ -1297,7 +1271,7 @@ static struct ib_mr *rxe_alloc_mr(struct
  	struct rxe_dev *rxe = to_rdev(ibpd->device);
  	struct rxe_pd *pd = to_rpd(ibpd);
@@ -282,7 +281,7 @@ Index: rxe/rxe/rxe_verbs.c
  err_cleanup:
 -	cleanup_err = rxe_cleanup(mr);
 -	if (cleanup_err)
--		rxe_err_mr(mr, "cleanup failed, err = %d", err);
+-		rxe_err_mr(mr, "cleanup failed, err = %d\n", err);
 +	rxe_cleanup(mr);
  err_free:
  	kfree(mr);
@@ -302,8 +301,8 @@ Index: rxe/rxe/rxe_verbs.c
  
 -	cleanup_err = rxe_cleanup(mr);
 -	if (cleanup_err)
--		rxe_err_mr(mr, "cleanup failed, err = %d", cleanup_err);
+-		rxe_err_mr(mr, "cleanup failed, err = %d\n", cleanup_err);
 +	rxe_cleanup(mr);
  
- 	kfree_rcu(mr);
+ 	kfree_rcu_mightsleep(mr);
  	return 0;

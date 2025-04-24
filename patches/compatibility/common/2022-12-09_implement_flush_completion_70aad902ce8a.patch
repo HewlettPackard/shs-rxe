@@ -19,4 +19,3 @@ index 1c525325e2716..20737fec392bf 100644
 +		    wqe->wr.opcode != IB_WR_FLUSH) {
  			wqe->status = IB_WC_FATAL_ERR;
  			return COMPST_ERROR;
- 		}

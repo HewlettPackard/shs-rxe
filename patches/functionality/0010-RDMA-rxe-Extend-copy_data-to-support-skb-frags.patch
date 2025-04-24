@@ -1,0 +1,329 @@
+From 0fd803d9f856daffe75e134c3245db64b26c5826 Mon Sep 17 00:00:00 2001
+From: Bob Pearson <rpearsonhpe@gmail.com>
+Date: Fri, 16 Jun 2023 14:16:58 -0500
+Subject: [PATCH 10/17] RDMA/rxe: Extend copy_data to support skb frags
+
+copy_data() currently supports copying between an mr and
+the scatter-gather list of a wqe.
+
+Rename copy_data() to rxe_copy_dma_data().
+Extend the operations to support copying between a sg list and an skb
+fragment list. Fixup calls to copy_data() to support the new API.
+Add a routine to count the number of skbs required for
+rxe_copy_dma_data().
+
+Signed-off-by: Bob Pearson <rpearsonhpe@gmail.com>
+---
+ drivers/infiniband/sw/rxe/rxe_comp.c |  17 ++-
+ drivers/infiniband/sw/rxe/rxe_loc.h  |  10 +-
+ drivers/infiniband/sw/rxe/rxe_mr.c   | 175 +++++++++++++++++----------
+ drivers/infiniband/sw/rxe/rxe_req.c  |  11 +-
+ drivers/infiniband/sw/rxe/rxe_resp.c |   7 +-
+ 5 files changed, 139 insertions(+), 81 deletions(-)
+
+diff --git a/drivers/infiniband/sw/rxe/rxe_comp.c b/drivers/infiniband/sw/rxe/rxe_comp.c
+index e3f8dfc9b8bf..670ee08f6f5a 100644
+--- a/drivers/infiniband/sw/rxe/rxe_comp.c
++++ b/drivers/infiniband/sw/rxe/rxe_comp.c
+@@ -364,11 +364,14 @@ static inline enum comp_state do_read(struct rxe_qp *qp,
+ 				      struct rxe_pkt_info *pkt,
+ 				      struct rxe_send_wqe *wqe)
+ {
++	struct sk_buff *skb = PKT_TO_SKB(pkt);
++	int skb_offset = 0;
+ 	int ret;
+ 
+-	ret = copy_data(qp->pd, IB_ACCESS_LOCAL_WRITE,
+-			&wqe->dma, payload_addr(pkt),
+-			payload_size(pkt), RXE_TO_MR_OBJ);
++	ret = copy_data(skb, qp->pd, IB_ACCESS_LOCAL_WRITE,
++			&wqe->dma, payload_addr(pkt),
++			skb_offset, payload_size(pkt),
++			RXE_TO_MR_OBJ);
+ 	if (ret) {
+ 		wqe->status = IB_WC_LOC_PROT_ERR;
+ 		return COMPST_ERROR;
+@@ -384,13 +387,15 @@ static inline enum comp_state do_atomic(struct rxe_qp *qp,
+ 					struct rxe_pkt_info *pkt,
+ 					struct rxe_send_wqe *wqe)
+ {
++	struct sk_buff *skb = NULL;
++	int skb_offset = 0;
+ 	int ret;
+ 
+ 	u64 atomic_orig = atmack_orig(pkt);
+ 
+-	ret = copy_data(qp->pd, IB_ACCESS_LOCAL_WRITE,
+-			&wqe->dma, &atomic_orig,
+-			sizeof(u64), RXE_TO_MR_OBJ);
++	ret = copy_data(skb, qp->pd, IB_ACCESS_LOCAL_WRITE,
++			&wqe->dma, &atomic_orig,
++			skb_offset, sizeof(u64), RXE_TO_MR_OBJ);
+ 	if (ret) {
+ 		wqe->status = IB_WC_LOC_PROT_ERR;
+ 		return COMPST_ERROR;
+diff --git a/drivers/infiniband/sw/rxe/rxe_loc.h b/drivers/infiniband/sw/rxe/rxe_loc.h
+index 77661e0ccab7..fad853199b4d 100644
+--- a/drivers/infiniband/sw/rxe/rxe_loc.h
++++ b/drivers/infiniband/sw/rxe/rxe_loc.h
+@@ -70,14 +70,17 @@ int rxe_num_mr_frags(struct sk_buff *skb, u64 iova, unsigned int length);
+ int rxe_mr_copy(struct sk_buff *skb, struct rxe_mr *mr, u64 iova,
+ 		void *addr, unsigned int skb_offset,
+ 		unsigned int length, enum rxe_mr_copy_dir dir);
+-int copy_data(struct rxe_pd *pd, int access, struct rxe_dma_info *dma,
+-	      void *addr, int length, enum rxe_mr_copy_dir dir);
++int rxe_num_dma_frags(const struct rxe_pd *pd, const struct rxe_dma_info *dma,
++		      unsigned int length);
++int copy_data(struct sk_buff *skb, struct rxe_pd *pd, int access,
++		struct rxe_dma_info *dma, void *addr, unsigned int skb_offset,
++		int length, enum rxe_mr_copy_dir dir);
+ int rxe_map_mr_sg(struct ib_mr *ibmr, struct scatterlist *sg,
+ 		  int sg_nents, unsigned int *sg_offset);
+ int rxe_mr_do_atomic_op(struct rxe_mr *mr, u64 iova, int opcode,
+ 			u64 compare, u64 swap_add, u64 *orig_val);
+ int rxe_mr_do_atomic_write(struct rxe_mr *mr, u64 iova, u64 value);
+-struct rxe_mr *lookup_mr(struct rxe_pd *pd, int access, u32 key,
++struct rxe_mr *lookup_mr(const struct rxe_pd *pd, int access, u32 key,
+ 			 enum rxe_mr_lookup_type type);
+ int mr_check_range(struct rxe_mr *mr, u64 iova, size_t length);
+ int advance_dma_data(struct rxe_dma_info *dma, unsigned int length);
+diff --git a/drivers/infiniband/sw/rxe/rxe_mr.c b/drivers/infiniband/sw/rxe/rxe_mr.c
+index d005a1cd64d2..e27f94bfbb3f 100644
+--- a/drivers/infiniband/sw/rxe/rxe_mr.c
++++ b/drivers/infiniband/sw/rxe/rxe_mr.c
+@@ -290,6 +290,54 @@ int rxe_num_mr_frags(struct rxe_mr *mr, u64 iova, unsigned int length)
+ 	return num_frags;
+ }
+ 
++int rxe_num_dma_frags(const struct rxe_pd *pd, const struct rxe_dma_info *dma,
++		      unsigned int length)
++{
++	unsigned int cur_sge = dma->cur_sge;
++	const struct rxe_sge *sge = &dma->sge[cur_sge];
++	unsigned int offset = dma->sge_offset;
++	struct rxe_mr *mr = NULL;
++	unsigned int bytes;
++	u64 iova;
++	int num_frags = 0;
++
++	if (WARN_ON(length > dma->resid))
++		return 0;
++
++	while (length) {
++		if (offset >= sge->length) {
++			if (mr)
++				rxe_put(mr);
++			sge++;
++			cur_sge++;
++			offset = 0;
++
++			if (WARN_ON(cur_sge >= dma->num_sge))
++				return 0;
++			if (!sge->length)
++				continue;
++		}
++		
++		mr  = lookup_mr(pd, 0, sge->lkey, RXE_LOOKUP_LOCAL);
++		if (WARN_ON(!mr))
++			return 0;
++
++		bytes = min_t(unsigned int, length,
++				sge->length - offset);
++		if (bytes) {
++			iova = sge->addr + offset;
++			num_frags += rxe_num_mr_frags(mr, iova, length);
++			offset += bytes;
++			length -= bytes;
++		}
++	}
++
++	if (mr)
++		rxe_put(mr);
++
++	return num_frags;
++}
++
+ static int rxe_mr_copy_xarray(struct sk_buff *skb, struct rxe_mr *mr,
+ 			      u64 iova, void *addr, unsigned int skb_offset,
+ 			      unsigned int length, enum rxe_mr_copy_dir dir)
+@@ -423,10 +471,12 @@ int rxe_mr_copy(struct sk_buff *skb, struct rxe_mr *mr, u64 iova,
+  * under the control of a dma descriptor
+  */
+ int copy_data(
++	struct sk_buff		*skb,
+ 	struct rxe_pd		*pd,
+ 	int			access,
+ 	struct rxe_dma_info	*dma,
+ 	void			*addr,
++	unsigned int		skb_offset,
+ 	int			length,
+ 	enum rxe_mr_copy_dir	dir)
+ {
+@@ -436,82 +486,55 @@ int copy_data(
+ 	int			resid	= dma->resid;
+ 	struct rxe_mr		*mr	= NULL;
+ 	u64			iova;
+-	int			err;
++	int			err 	= 0;
+ 
+ 	if (length == 0)
+ 		return 0;
+ 
+-	if (length > resid) {
+-		err = -EINVAL;
+-		goto err2;
+-	}
+-
+-	if (sge->length && (offset < sge->length)) {
+-		mr = lookup_mr(pd, access, sge->lkey, RXE_LOOKUP_LOCAL);
+-		if (!mr) {
+-			err = -EINVAL;
+-			goto err1;
+-		}
+-	}
++	if (length > resid)
++		return = -EINVAL;
+ 
+ 	while (length > 0) {
+-		bytes = length;
+-
+ 		if (offset >= sge->length) {
+-			if (mr) {
++			if (mr)
+ 				rxe_put(mr);
+-				mr = NULL;
+-			}
++
+ 			sge++;
+ 			dma->cur_sge++;
+ 			offset = 0;
+ 
+-			if (dma->cur_sge >= dma->num_sge) {
+-				err = -ENOSPC;
+-				goto err2;
+-			}
+-
+-			if (sge->length) {
+-				mr = lookup_mr(pd, access, sge->lkey,
+-					       RXE_LOOKUP_LOCAL);
+-				if (!mr) {
+-					err = -EINVAL;
+-					goto err1;
+-				}
+-			} else {
++			if (dma->cur_sge >= dma->num_sge)
++				return -EINVAL;
++			if (!sge->length) 
+ 				continue;
+-			}
+ 		}
+ 
+-		if (bytes > sge->length - offset)
+-			bytes = sge->length - offset;
++		mr = lookup_mr(pd, access, sge->lkey, RXE_LOOKUP_LOCAL);
++		if (!mr)
++			return -EINVAL;
+ 
++		bytes = min_t(int, length, sge->length - offset);
+ 		if (bytes > 0) {
+ 			iova = sge->addr + offset;
+-			err = rxe_mr_copy(NULL, mr, iova, addr, 0,
+-					  bytes, dir);
++			err = rxe_mr_copy(skb, mr, iova, addr,
++					  skb_offset, bytes, dir);
+ 			if (err)
+-				goto err2;
++				goto err_put;
+ 
+ 			offset	+= bytes;
+ 			resid	-= bytes;
+ 			length	-= bytes;
+ 			addr	+= bytes;
++			skb_offset += bytes;
+ 		}
+ 	}
+ 
+ 	dma->sge_offset = offset;
+ 	dma->resid	= resid;
+ 
++err_put:
+ 	if (mr)
+ 		rxe_put(mr);
+-
+-	return 0;
+-
+-err2:
+-	if (mr)
+-		rxe_put(mr);
+-err1:
+ 	return err;
+ }
+ 
+@@ -711,7 +734,7 @@ int advance_dma_data(struct rxe_dma_info *dma, unsigned int length)
+ 	return 0;
+ }
+ 
+-struct rxe_mr *lookup_mr(struct rxe_pd *pd, int access, u32 key,
++struct rxe_mr *lookup_mr(const struct rxe_pd *pd, int access, u32 key,
+ 			 enum rxe_mr_lookup_type type)
+ {
+ 	struct rxe_mr *mr;
+diff --git a/drivers/infiniband/sw/rxe/rxe_req.c b/drivers/infiniband/sw/rxe/rxe_req.c
+index 4f074f0373a3..1d5df5fb2aa0 100644
+--- a/drivers/infiniband/sw/rxe/rxe_req.c
++++ b/drivers/infiniband/sw/rxe/rxe_req.c
+@@ -478,8 +478,10 @@ static void rxe_init_roce_hdrs(struct rxe_qp *qp, struct rxe_send_wqe *wqe,
+ }
+ 
+ static int rxe_init_payload(struct rxe_qp *qp, struct rxe_send_wqe *wqe,
+-			    struct rxe_pkt_info *pkt, u32 payload)
++			    struct rxe_pkt_info *pkt, u32 payload,
++			    struct sk_buff *skb)
+ {
++	int skb_offset = 0;
+ 	void *data;
+ 	int err = 0;
+ 
+@@ -489,8 +491,9 @@ static int rxe_init_payload(struct rxe_qp *qp, struct rxe_send_wqe *wqe,
+ 		wqe->dma.resid -= payload;
+ 		wqe->dma.sge_offset += payload;
+ 	} else {
+-		err = copy_data(qp->pd, 0, &wqe->dma, payload_addr(pkt),
+-				payload, RXE_FROM_MR_OBJ);
++		err = copy_data(skb, qp->pd, 0, &wqe->dma,
++				payload_addr(pkt), skb_offset,
++				payload, RXE_FROM_MR_OBJ);
+ 	}
+ 
+ 	return err;
+@@ -542,7 +545,7 @@ static struct sk_buff *rxe_init_req_packet(struct rxe_qp *qp,
+ 
+ 	/* init payload if any */
+ 	if (pkt->mask & RXE_WRITE_OR_SEND_MASK) {
+-		err = rxe_init_payload(qp, wqe, pkt, payload);
++		err = rxe_init_payload(qp, wqe, pkt, payload, skb);
+ 		if (unlikely(err))
+ 			goto err_out;
+ 	} else if (pkt->mask & RXE_FLUSH_MASK) {
+diff --git a/drivers/infiniband/sw/rxe/rxe_resp.c b/drivers/infiniband/sw/rxe/rxe_resp.c
+index 87d61a462ff5..a6c1d67ad943 100644
+--- a/drivers/infiniband/sw/rxe/rxe_resp.c
++++ b/drivers/infiniband/sw/rxe/rxe_resp.c
+@@ -562,10 +562,13 @@ static enum resp_states check_rkey(struct rxe_qp *qp,
+ static enum resp_states send_data_in(struct rxe_qp *qp, void *data_addr,
+ 				     int data_len)
+ {
++	struct sk_buff *skb = NULL;
++	int skb_offset = 0;
+ 	int err;
+ 
+-	err = copy_data(qp->pd, IB_ACCESS_LOCAL_WRITE, &qp->resp.wqe->dma,
+-			data_addr, data_len, RXE_TO_MR_OBJ);
++	err = copy_data(skb, qp->pd, IB_ACCESS_LOCAL_WRITE,
++			&qp->resp.wqe->dma, data_addr,
++			skb_offset, data_len, RXE_TO_MR_OBJ);
+ 	if (unlikely(err))
+ 		return (err == -ENOSPC) ? RESPST_ERR_LENGTH
+ 					: RESPST_ERR_MALFORMED_WQE;
+-- 
+2.39.2

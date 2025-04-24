@@ -1,0 +1,196 @@
+From 0e2e7c0b408ea781654101a4876595b796518b5c Mon Sep 17 00:00:00 2001
+From: Bob Pearson <rpearsonhpe@gmail.com>
+Date: Fri, 16 Jun 2023 13:58:13 -0500
+Subject: [PATCH 05/17] RDMA/rxe: Isolate code to build request packet
+
+Isolate the code to build a request packet into a single
+subroutine called rxe_init_req_packet().
+
+Signed-off-by: Bob Pearson <rpearsonhpe@gmail.com>
+---
+ drivers/infiniband/sw/rxe/rxe_req.c | 127 +++++++++++++---------------
+ 1 file changed, 60 insertions(+), 67 deletions(-)
+
+diff --git a/drivers/infiniband/sw/rxe/rxe_req.c b/drivers/infiniband/sw/rxe/rxe_req.c
+index 2d0c90df2c25..51ec01daf27f 100644
+--- a/drivers/infiniband/sw/rxe/rxe_req.c
++++ b/drivers/infiniband/sw/rxe/rxe_req.c
+@@ -497,14 +497,32 @@ static int rxe_init_payload(struct rxe_qp *qp, struct rxe_send_wqe *wqe,
+ 	return err;
+ }
+ 
+-static struct sk_buff *init_req_packet(struct rxe_qp *qp,
+-				       struct rxe_av *av,
+-				       struct rxe_send_wqe *wqe,
+-				       int opcode, u32 payload,
+-				       struct rxe_pkt_info *pkt)
++static struct sk_buff *rxe_init_req_packet(struct rxe_qp *qp,
++					   struct rxe_send_wqe *wqe,
++					   int opcode, u32 payload,
++					   struct rxe_pkt_info *pkt)
+ {
+ 	struct rxe_dev		*rxe = to_rdev(qp->ibqp.device);
+-	struct sk_buff		*skb;
++	struct sk_buff		*skb = NULL;
++	struct rxe_av		*av;
++	struct rxe_ah		*ah = NULL;
++	u8			*pad_addr;
++	int			err;
++
++	pkt->rxe = rxe;
++	pkt->opcode = opcode;
++	pkt->qp = qp;
++	pkt->psn = qp->req.psn;
++	pkt->mask = rxe_opcode[opcode].mask;
++	pkt->wqe = wqe;
++	pkt->port_num = 1;
++
++	/* get address vector and address handle for UD qps only */
++	av = rxe_get_av(pkt, &ah);
++	if (unlikely(!av)) {
++		err = -EINVAL;
++		goto err_out;
++	}
+ 
+ 	/* length from start of bth to end of icrc */
+ 	pkt->pad = (-payload) & 0x3;
+@@ -512,31 +530,19 @@ static struct sk_buff *init_req_packet(struct rxe_qp *qp,
+ 
+ 	/* init skb */
+ 	skb = rxe_init_packet(rxe, av, pkt);
+-	if (unlikely(!skb))
+-		return NULL;
++	if (unlikely(!skb)) {
++		err = -ENOMEM;
++		goto err_out;
++	}
+ 
++	/* init roce headers */
+ 	rxe_init_roce_hdrs(qp, wqe, pkt);
+ 
+-	return skb;
+-}
+-
+-static int finish_packet(struct rxe_qp *qp, struct rxe_av *av,
+-			 struct rxe_send_wqe *wqe, struct rxe_pkt_info *pkt,
+-			 struct sk_buff *skb, u32 payload)
+-{
+-	u8 *pad_addr;
+-	int err;
+-
+-	err = rxe_prepare(av, pkt, skb);
+-	if (err)
+-		return err;
+-
++	/* init payload if any */
+ 	if (pkt->mask & RXE_WRITE_OR_SEND_MASK) {
+ 		err = rxe_init_payload(qp, wqe, pkt, payload);
+-		if (pkt->pad) {
+-			pad_addr = payload_addr(pkt) + payload;
+-			memset(pad_addr, 0, pkt->pad);
+-		}
++		if (unlikely(err))
++			goto err_out;
+ 	} else if (pkt->mask & RXE_FLUSH_MASK) {
+ 		/* oA19-2: shall have no payload. */
+ 		wqe->dma.resid = 0;
+@@ -547,7 +553,32 @@ static int finish_packet(struct rxe_qp *qp, struct rxe_av *av,
+ 		wqe->dma.resid -= payload;
+ 	}
+ 
+-	return 0;
++	/* init pad and icrc */
++	if (pkt->pad) {
++		pad_addr = payload_addr(pkt) + payload;
++		memset(pad_addr, 0, pkt->pad);
++	}
++
++	/* init IP and UDP network headers */
++	err = rxe_prepare(av, pkt, skb);
++	if (unlikely(err))
++		goto err_out;
++
++	if (ah)
++		rxe_put(ah);
++
++	return skb;
++
++err_out:
++	if (err == -EFAULT)
++		wqe->status = IB_WC_LOC_PROT_ERR;
++	else
++		wqe->status = IB_WC_LOC_QP_OP_ERR;
++	if (skb)
++		kfree_skb(skb);
++	if (ah)
++		rxe_put(ah);
++	return NULL;
+ }
+ 
+ static void update_wqe_state(struct rxe_qp *qp,
+@@ -676,7 +707,6 @@ static int rxe_do_local_ops(struct rxe_qp *qp, struct rxe_send_wqe *wqe)
+ 
+ int rxe_requester(struct rxe_qp *qp)
+ {
+-	struct rxe_dev *rxe = to_rdev(qp->ibqp.device);
+ 	struct rxe_pkt_info pkt;
+ 	struct sk_buff *skb;
+ 	struct rxe_send_wqe *wqe;
+@@ -689,8 +719,6 @@ int rxe_requester(struct rxe_qp *qp)
+ 	int err;
+ 	int ret;
+ 	struct rxe_queue *q = qp->sq.queue;
+-	struct rxe_ah *ah;
+-	struct rxe_av *av;
+ 	unsigned long flags;
+ 
+ 	spin_lock_irqsave(&qp->state_lock, flags);
+@@ -802,44 +830,9 @@ int rxe_requester(struct rxe_qp *qp)
+ 		payload = mtu;
+ 	}
+ 
+-	pkt.rxe = rxe;
+-	pkt.opcode = opcode;
+-	pkt.qp = qp;
+-	pkt.psn = qp->req.psn;
+-	pkt.mask = rxe_opcode[opcode].mask;
+-	pkt.wqe = wqe;
+-
+-	av = rxe_get_av(&pkt, &ah);
+-	if (unlikely(!av)) {
+-		rxe_dbg_qp(qp, "Failed no address vector\n");
+-		wqe->status = IB_WC_LOC_QP_OP_ERR;
+-		goto err;
+-	}
+-
+-	skb = init_req_packet(qp, av, wqe, opcode, payload, &pkt);
+-	if (unlikely(!skb)) {
+-		rxe_dbg_qp(qp, "Failed allocating skb\n");
+-		wqe->status = IB_WC_LOC_QP_OP_ERR;
+-		if (ah)
+-			rxe_put(ah);
+-		goto err;
+-	}
+-
+-	err = finish_packet(qp, av, wqe, &pkt, skb, payload);
+-	if (unlikely(err)) {
+-		rxe_dbg_qp(qp, "Error during finish packet\n");
+-		if (err == -EFAULT)
+-			wqe->status = IB_WC_LOC_PROT_ERR;
+-		else
+-			wqe->status = IB_WC_LOC_QP_OP_ERR;
+-		kfree_skb(skb);
+-		if (ah)
+-			rxe_put(ah);
++	skb = rxe_init_req_packet(qp, wqe, opcode, payload, &pkt);
++	if (unlikely(!skb))
+ 		goto err;
+-	}
+-
+-	if (ah)
+-		rxe_put(ah);
+ 
+ 	err = rxe_xmit_packet(qp, &pkt, skb);
+ 	if (err) {
+-- 
+2.39.2

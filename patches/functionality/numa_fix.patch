@@ -130,5 +130,5 @@ index 80e1745..5264526 100644
 +extern struct mempolicy rxe_numa_policy;
 +extern unsigned long long exclude_numa_mask;
  
- #define rxe_dbg(fmt, ...) pr_debug("%s: " fmt "\n", __func__, ##__VA_ARGS__)
+ #define rxe_dbg(fmt, ...) pr_debug("%s: " fmt, __func__, ##__VA_ARGS__)
  #define rxe_dbg_dev(rxe, fmt, ...) ibdev_dbg(&(rxe)->ib_dev,		\

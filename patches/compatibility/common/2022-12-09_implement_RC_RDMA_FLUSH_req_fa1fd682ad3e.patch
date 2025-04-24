@@ -12,28 +12,29 @@ index 2713e90589225..899c8779f8001 100644
  	case IB_WR_RDMA_READ:
  		return IB_OPCODE_RC_RDMA_READ_REQUEST;
  
-@@ -458,11 +458,17 @@ static void rxe_init_roce_hdrs(struct rxe_qp *qp, struct rxe_send_wqe *wqe,
+@@ -458,11 +458,18 @@ static void rxe_init_roce_hdrs(struct rxe_qp *qp, struct rxe_send_wqe *wqe,
  
- 	/* init extended headers */
+ 	/* init optional headers */
  	if (pkt->mask & RXE_RETH_MASK) {
--		reth_set_rkey(pkt, wr->wr.rdma.rkey);
+-		reth_set_rkey(pkt, ibwr->wr.rdma.rkey);
 +		if (pkt->mask & RXE_FETH_MASK)
-+			reth_set_rkey(pkt, wr->wr.flush.rkey);
++			reth_set_rkey(pkt, ibwr->wr.flush.rkey);
 +		else
-+			reth_set_rkey(pkt, wr->wr.rdma.rkey);
++			reth_set_rkey(pkt, ibwr->wr.rdma.rkey);
  		reth_set_va(pkt, wqe->iova);
  		reth_set_len(pkt, wqe->dma.resid);
  	}
  
++	/* Fill Flush Extension Transport Header */
 +	if (pkt->mask & RXE_FETH_MASK)
-+		feth_init(pkt, wr->wr.flush.type, wr->wr.flush.level);
++		feth_init(pkt, ibwr->wr.flush.type, ibwr->wr.flush.level);
 +
  	if (pkt->mask & RXE_IMMDT_MASK)
- 		immdt_set_imm(pkt, wr->ex.imm_data);
+ 		immdt_set_imm(pkt, ibwr->ex.imm_data);
  
 @@ -488,6 +498,9 @@ static int finish_packet(struct rxe_qp *qp, struct rxe_av *av,
-
- 			memset(pad, 0, bth_pad(pkt));
+				   err);
+ 			goto err_out;
  		}
 +	} else if (pkt->mask & RXE_FLUSH_MASK) {
 +		/* oA19-2: shall have no payload. */
@@ -42,3 +43,15 @@ index 2713e90589225..899c8779f8001 100644
  
  	if (pkt->mask & RXE_ATOMIC_WRITE_MASK) {
 
+diff --git a/drivers/inifiniband/sw/rxe/rxe_verbs.c b/drivers/inifiniband/sw/rxe/rxe_verbs.c
+index d67fd9d..8d72bc3 100644
+--- a/drivers/inifiniband/sw/rxe/rxe_verbs.c
++++ b/drivers/inifiniband/sw/rxe/rxe_verbs.c
+@@ -792,6 +792,7 @@ static int init_send_wr(struct rxe_qp *qp, struct rxe_send_wr *wr,
+ 			break;
+ 		case IB_WR_SEND:
+ 		case IB_WR_BIND_MW:
++		case IB_WR_FLUSH:
+ 		case IB_WR_ATOMIC_WRITE:
+ 			break;
+ 		default:

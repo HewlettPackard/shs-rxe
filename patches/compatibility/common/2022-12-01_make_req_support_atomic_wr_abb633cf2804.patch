@@ -45,3 +45,15 @@ index 4d45f508392fe..2713e90589225 100644
  	if (payload > mtu) {
  		if (unlikely(qp_type(qp) == IB_QPT_UD)) {
  			fake_udp_send(qp, wqe);
+diff --git a/drivers/inifiniband/sw/rxe/rxe_verbs.c b/drivers/inifiniband/sw/rxe/rxe_verbs.c
+index 58299a2..d67fd9d 100644
+--- a/drivers/inifiniband/sw/rxe/rxe_verbs.c
++++ b/drivers/inifiniband/sw/rxe/rxe_verbs.c
+@@ -792,6 +792,7 @@ static int init_send_wr(struct rxe_qp *qp, struct rxe_send_wr *wr,
+ 			break;
+ 		case IB_WR_SEND:
+ 		case IB_WR_BIND_MW:
++		case IB_WR_ATOMIC_WRITE:
+ 			break;
+ 		default:
+ 			rxe_err_qp(qp, "unsupported wr opcode %d\n",
