@@ -10,7 +10,7 @@
 %endif
 
 Name:           cray-rxe-driver
-Version:        3.4.0
+Version:        3.5.0
 Release:        %(echo ${BUILD_METADATA})
 Summary:        Soft RoCE Driver
 License:        GPLv2
@@ -146,6 +146,7 @@ else
     exit 1
 fi
 ${postinst} %{name} %{version}-%{release}
+install -D %{dkms_source_tree}/%{name}-%{version}-%{release}/scripts/rxe_init.sh -m0777 /usr/bin/rxe_init.sh
 
 %preun dkms
 #
