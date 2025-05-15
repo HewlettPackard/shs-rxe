@@ -1,6 +1,6 @@
 *       @hpe/hpc-shs-ss11-codereviewers  @hpe/hpc-shs-rxe-codereviewers
 Jenkinsfile* @hpe/hpc-shs-cassini-enablement
-*.spec @hpe/hpc-shs-cassini-enablement
+*.spec @hpe/hpc-shs-cassini-enablement @hpe/hpc-shs-rxe-codereviewers
 rpm_build_* @hpe/hpc-shs-cassini-enablement
 runBuildPrep.sh @hpe/hpc-shs-cassini-enablement
 set_slingshot_version.sh @hpe/hpc-shs-cassini-enablement
