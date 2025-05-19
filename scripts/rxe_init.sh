@@ -1,6 +1,8 @@
 #!/bin/sh
 
+RXE_FORCE_INIT=${RXE_FORCE_INIT:=0}
 ethdevs=""
+forced=0
 if [[ $# -lt 1 ]] ; then
 	ethdevs="hsn0"
 else
@@ -12,14 +14,22 @@ else
 	done
 fi
 
+error() {
+	echo "$1"
+	if [[ ${RXE_FORCE_INIT} -eq 0 ]] ; then
+		echo "Set RXE_FORCE_INIT=1 to override"
+		exit 1
+	fi
+	forced=1
+}
+
 echo "Configuring Soft RoCE for $ethdevs"
 
 # Check if the cxi_ss1 is running
 if [[ ! -d /sys/class/cxi ]] ; then
 	echo "RXE requires CXI ethernet to be configured in order to work."
 	echo "Start the Cassini Driver, configure ethernet,"
-	echo "(including algorithmic MAC addressing), then re-run rxe_init.sh"
-	exit 1
+	error "(including algorithmic MAC addressing), then re-run rxe_init.sh"
 fi
 
 # Check if the ethdev(s) exist 
@@ -38,15 +48,13 @@ done
 if [[ "$badeths" != "" ]] ; then
 	echo "Devices [$badeths] are not configured"
 	echo "RXE requires ethernet to be configured in order to work."
-	echo "Configure ethernet (including algorithmic MAC addressing), then re-run rxe_init.sh"
-	exit 1
+	error "Configure ethernet (including algorithmic MAC addressing), then re-run rxe_init.sh"
 fi
 
 # Check if the settings for the ethdev are correct
 if [[ $(cat /sys/module/cxi_eth/parameters/large_pkts_buf_count) -ne 10000 ]] ; then
 	echo "RXE requires cxi_eth to be configured with large_pkts_buf_count=10000"
-	echo "Please modify system configuration and re-run rxe_init.sh"
-	exit 1;
+	error "Please modify system configuration and re-run rxe_init.sh"
 fi
 
 # Check if rxe is up
@@ -55,11 +63,10 @@ for ethdev in $ethdevs; do
 	rxeup=$((rxeup + $(rdma link show | grep -c $ethdev)))
 done
 if [ $rxeup -gt 0 ] ; then
-	modprobe -r rdma_rxe
 	if [[ $? -ne 0 ]] ; then 
-		echo "RXE device(s) in use, please shut down whatever app is using it prior to running rxe_init.sh"
-		exit 1
+		error "RXE device(s) in use, please shut down prior to running rxe_init.sh"
 	fi
+	modprobe -r rdma_rxe
 fi
 
 # Adjust system settings
@@ -76,8 +83,7 @@ for ethdev in $ethdevs; do
 	macaddr=$(cat /sys/class/net/${ethdev}/address)
 	vendorid=$(echo $macaddr | cut -d":" -f 1,2,3)
 	if [[ "$vendorid" == "00:40:a6" ]] ; then
-		echo "Please assign algorithmic MAC addresses prior to rxe_init.sh"
-		exit 1
+		error "Please assign algorithmic MAC addresses prior to rxe_init.sh"
 	fi
 	linkchange=0
 	setmtu=0
@@ -114,8 +120,7 @@ for ethdev in $ethdevs; do
 			linkup=0
 			ip link set $ethdev down
 			if [[ $? -ne 0 ]] ; then
-				echo "Unable to bring eth link down to change settings"
-				exit 1
+				error "Unable to bring eth link down to change settings"
 			fi
 		fi
 	fi
@@ -123,22 +128,19 @@ for ethdev in $ethdevs; do
 	if [[ $setmtu -eq 1 ]] ; then
 		ip link set dev $ethdev mtu 9000
 		if [[ $? -ne 0 ]] ; then
-			echo "Failed to set $ethdev mtu to 9000"
-			exit 1
+			error "Failed to set $ethdev mtu to 9000"
 		fi
 	fi
 	if [[ $(( $setrx + $settx )) -gt 0 ]] ; then
 		ethtool -L $ethdev rx 16 tx 16
 		if [[ $? -ne 0 ]] ; then
-			echo "Failed to set $ethdev rx/tx queues to 16/16" 
-			exit 1
+			error  "Failed to set $ethdev rx/tx queues to 16/16" 
 		fi
 	fi
 	if [[ $setroceopt -eq 1 ]] ; then
 		ethtool --set-priv-flags $ethdev roce-opt on
 		if [[ $? -ne 0 ]] ; then
-			echo "Failed to enable $ethdev RoCE optimizations"
-			exit 1
+			error "Failed to enable $ethdev RoCE optimizations"
 		fi
 	fi
 
@@ -146,8 +148,7 @@ for ethdev in $ethdevs; do
 	if [[ $linkup -ne 1 ]] ; then
 		ip link set $ethdev up
 		if [[ $? -ne 0 ]] ; then
-			echo "Failed to bring $ethdev link up"
-			exit 1
+			error "Failed to bring $ethdev link up"
 		fi
 	fi
 
@@ -161,7 +162,7 @@ for ethdev in $ethdevs; do
 	rxedev=$(echo "$ethdev" | sed -e "s/[a-z_]*/rxe/")
 	rdma link add $rxedev type rxe netdev $ethdev
 	if [[ $? -ne 0 ]] ; then
-		echo "Unable to create $rxedev on $ethdev"
+		error "Unable to create $rxedev on $ethdev"
 		exit 1
 	fi
 done
@@ -170,3 +171,9 @@ echo 8 >/sys/module/rdma_rxe/parameters/max_pkt_per_ack
 echo 16 >/sys/module/rdma_rxe/parameters/max_unacked_psns
 echo 64 >/sys/module/rdma_rxe/parameters/inflight_skbs_per_qp_low
 echo 256 >/sys/module/rdma_rxe/parameters/inflight_skbs_per_qp_high
+
+if [[ $forced -ne 0 ]] ; then
+	echo "Configuration FORCED.  Performance may be suboptimal"
+	echo "Not all devices may be configured correctly"
+	echo "Check errors output during init for more details"
+fi
