@@ -44,6 +44,9 @@ elif [[ "${RXE_TARGET}" = "ROCKY_9_2" ]]; then
 elif [[ "${RXE_TARGET}" = "RHEL_9_4" ]]; then
     export QUILT_SERIES=RHEL_9_4.series
     compatibility_files=""
+elif [[ "${RXE_TARGET}" = "RXE_DEVEL" ]]; then
+    export QUILT_SERIES=RXE_DEVEL.series
+    compatibility_files=""
 else
     echo "No patch series found for target ${RXE_TARGET}"
     rm -rf rxe

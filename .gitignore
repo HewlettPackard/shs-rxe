@@ -4,4 +4,5 @@
 patches/SLES*.series
 patches/ROCKY*.series
 patches/RHEL*.series
+patches/RXE*.series
 cray-rxe-driver*.tar.gz
