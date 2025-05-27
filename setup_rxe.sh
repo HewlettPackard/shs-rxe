@@ -26,9 +26,6 @@ cleanup_and_fail() {
 	exit ${RXE_ERR_RET}
 }
 
-
-[[ -f rxe/.rxe_setup_complete ]] && exit 0;
-
 RXE_TARGET=${RXE_TARGET:="UNKNOWN"}
 
 if [[ "${RXE_TARGET}" == "UNKNOWN" ]]; then
@@ -72,6 +69,17 @@ else
     cleanup_and_fail "No patch series found for target ${RXE_TARGET}"
 fi
 
+# Check if we already have a source tree
+if [[ -f rxe/.rxe_setup_complete ]]; then
+	source rxe/.rxe_setup_complete
+	if [[ "${RXE_BUILT_FOR}" == "${RXE_TARGET}" ]]; then
+		# nothing to do
+		exit 0
+	fi
+	echo "WARNING: Previously built tree for '${RXE_BUILT_FOR}' being destroy"
+	rm -rf rxe/ .pc/
+fi
+
 echo "Build for ${RXE_TARGET}"
 echo "Version = ${VER_STR}"
 echo "Quilt Series = $QUILT_SERIES"
@@ -85,4 +93,4 @@ done
 tar -xzf $tarball
 echo "#define RXE_VERSION_STRING \"${VER_STR}\"" > rxe/rxe_ver_str.h
 
-quilt push -a && touch rxe/.rxe_setup_complete
+quilt push -a && `echo "RXE_BUILT_FOR=${RXE_TARGET}" > rxe/.rxe_setup_complete`
