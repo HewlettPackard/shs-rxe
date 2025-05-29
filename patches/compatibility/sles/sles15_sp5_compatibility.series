@@ -1,1 +1,14 @@
+compatibility/common/2023-06-27_merge_tag_rcu_af96134d.patch -p4 -R
+compatibility/common/2023-06-20_Fixes_mr_access_list_ee678e5d.patch -p4 -R
+compatibility/common/2023-04-16_add_ib_virt_dma_to_page_8d7c7c0eeb74.patch -p4 -R
+compatibility/common/2023-01-27_partial_replace_map_and_phys_buf_with_xarray.patch -p4 -R
+compatibility/common/2022-12-09_enable_rdma_flush_124011e6e933.patch -p4 -R
+compatibility/common/2022-12-09_implement_flush_completion_70aad902ce8a.patch -p4 -R
+compatibility/common/2022-12-09_implement_flush_exec_in_resp_ea1bb00ee9a5.patch -p4 -R
+compatibility/common/2022-12-09_implement_RC_RDMA_FLUSH_req_fa1fd682ad3e.patch -p4 -R
+compatibility/common/2022-12-09_extend_rxe_pkt_for_flush_02e9a31c897d.patch -p4 -R
+compatibility/common/2022-12-01_enable_atomic_wr_4cd9f1d320f9.patch -p4 -R
+compatibility/common/2022-12-01_implement_atomic_wr_comp_3aec427bb149.patch -p4 -R
+compatibility/common/2022-12-01_make_req_support_atomic_wr_abb633cf2804.patch -p4 -R
+compatibility/common/2022-12-01_extend_rxe_pkt_for_atomic_wr_5c7af6c79384.patch -p4 -R
 compatibility/sles/2022-04-06_split_kernel_dev_caps_e945c653c8e9.patch -p4 -R

@@ -36,15 +36,12 @@ if [[ "${RXE_TARGET}" == "UNKNOWN" ]]; then
 		rel=$(lsb_release -d -s | sed -e s~\"~~g)
 	fi
 	# SLES15 returns a string with quotes for whatever reason.
-	if [[ "$rel" = "SUSE Linux Enterprise Server 15 SP4" ]]; then
-		distro="sles"
-		RXE_TARGET=SLES_15_SP4
-	elif [[ "$rel" = "SUSE Linux Enterprise Server 15 SP5" ]]; then
+	if [[ "$rel" = "SUSE Linux Enterprise Server 15 SP5" ]]; then
 		distro="sles"
 		RXE_TARGET=SLES_15_SP5
-	elif [[ "$rel" = "Rocky Linux 9.2 (Blue Onyx)" ]]; then
-		distro="rocky"
-		RXE_TARGET=ROCKY_9_2
+	elif [[ "$rel" = "SUSE Linux Enterprise Server 15 SP6" ]]; then
+		distro="sles"
+		RXE_TARGET=SLES_15_SP6
 	elif [[ "$rel" = "Red Hat Enterprise Linux 9.4 (Plow)" ]]; then
 		distro="rhel"
 		RXE_TARGET=RHEL_9_4
@@ -57,16 +54,12 @@ tarball=rxe-6.13.tar.gz
 
 compatibility_files="${distro}/${distro}.series"
 
-if [[ "${RXE_TARGET}" = "SLES_15_SP4" ]]; then
-    export QUILT_SERIES=SLES-15-SP4.series
-    compatibility_files="${compatibility_files} ${distro}/sles15_sp5_compatibility.series"
-    compatibility_files="${compatibility_files} ${distro}/sles15_sp4_compatibility.series"
-elif [[ "${RXE_TARGET}" = "SLES_15_SP5" ]]; then
+if [[ "${RXE_TARGET}" = "SLES_15_SP5" ]]; then
     export QUILT_SERIES=SLES-15-SP5.series
     compatibility_files="${compatibility_files} ${distro}/sles15_sp5_compatibility.series"
-elif [[ "${RXE_TARGET}" = "ROCKY_9_2" ]]; then
-    export QUILT_SERIES=ROCKY_9_2.series
-    compatibility_files="${compatibility_files} ${distro}/rocky9.2_compatibility.series"
+elif [[ "${RXE_TARGET}" = "SLES_15_SP6" ]]; then
+    export QUILT_SERIES=SLES-15-SP6.series
+    compatibility_files="${compatibility_files}"
 elif [[ "${RXE_TARGET}" = "RHEL_9_4" ]]; then
     export QUILT_SERIES=RHEL_9_4.series
     compatibility_files="${compatibility_files}"

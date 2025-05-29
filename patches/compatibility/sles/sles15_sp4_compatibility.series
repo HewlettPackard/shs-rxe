@@ -1,2 +1,0 @@
-#01-07-2022
-compatibility/sles/revert_standard_method_udp_sport.patch -p4 -R
