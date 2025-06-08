@@ -27,7 +27,7 @@ then
     exit 1
 fi
 
-if [ ! -f ${SYMVERS_DIR}/Module.symvers ]
+if [ ! -f ${SYMVERS_DIR}/rxe/Module.symvers ]
 then
     echo "error: ${SYMVERS_DIR}/Module.symvers is not present or is not a file"
     exit 1
@@ -51,5 +51,5 @@ then
     exit 1
 fi
 
-cp -f ${SYMVERS_DIR}/Module.symvers ${PACKAGE_DIR}/${kernelver}/${arch}/module
+cp -f ${SYMVERS_DIR}/rxe/Module.symvers ${PACKAGE_DIR}/${kernelver}/${arch}/module
 exit ${?}

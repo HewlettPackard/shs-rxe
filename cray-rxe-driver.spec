@@ -16,15 +16,14 @@ Summary:        Soft RoCE Driver
 License:        GPLv2
 Source0:        %{name}-%{version}.tar.gz
 %if 0%{?include_aux_files}
-Source1:	kmp_files
-Source2:	rxe_versions
+Source1:    kmp_files
+Source2:    rxe_versions
 %endif
 Prefix:         /usr
 
 BuildRequires:  quilt
 %if 0%{?sle_version} >= 150200
 # Make sure a SLES release file is installed
-BuildRequires:  lsb-release
 BuildRequires:  sles-release
 %endif
 BuildRequires:  %kernel_module_package_buildreqs
@@ -42,12 +41,11 @@ Development files for Cray Enhanced Soft RoCE driver
 
 %package dkms
 Summary:        DKMS support for %{name} kernel modules
-Requires: 	quilt
+Requires:   quilt
 Requires:       dkms
-Requires: 	lsb-release
 %if 0%{?sle_version} >= 150200
 # Make sure a SLES release file is installed
-Requires:  	sles-release
+Requires:   sles-release
 %endif
 BuildArch:      noarch
 
