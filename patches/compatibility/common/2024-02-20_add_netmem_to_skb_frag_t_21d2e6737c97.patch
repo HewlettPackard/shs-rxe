@@ -1,0 +1,35 @@
+This patch is actually a patch of the cray enhanced rxe
+driver functionality, not mainline kernel source.  The
+referenced commit is the RDMA fork commit that caused us
+to update the functionality to support TOT kernels.
+
+diff --git a/rxe/rxe_mr.c b/rxe/rxe_mr.c
+index 488bd95..f4a9ae2 100644
+--- a/rxe/rxe_mr.c
++++ b/rxe/rxe_mr.c
+@@ -256,9 +256,7 @@ int rxe_add_frag(struct sk_buff *skb, struct rxe_mr *mr, struct page *page,
+ 		return -EINVAL;
+ 	}
+ 
+-	frag->bv_len = length;
+-	frag->bv_offset = offset;
+-	frag->bv_page = page;
++	skb_frag_fill_page_desc(frag, page, offset, length);
+ 	/* because kfree_skb will call put_page() */
+ 	get_page(page);
+ 	skb_shinfo(skb)->nr_frags++;
+diff --git a/rxe/rxe_icrc.c b/rxe/rxe_icrc.c
+index 43b5b42..dc7221e 100644
+--- a/rxe/rxe_icrc.c
++++ b/rxe/rxe_icrc.c
+@@ -127,8 +127,8 @@ static __be32 rxe_icrc_payload(struct sk_buff *skb, struct rxe_pkt_info *pkt,
+ 	/* handle any payload in frags */
+ 	for (i = 0; i < shinfo->nr_frags; i++) {
+ 		frag = &shinfo->frags[i];
+-		addr = page_to_virt(frag->bv_page) + frag->bv_offset;
+-		len = frag->bv_len;
++		addr = page_to_virt(skb_frag_page(frag)) + skb_frag_off(frag);
++		len = skb_frag_size(frag);
+ 		if (i == shinfo->nr_frags - 1) {
+ 			len -= RXE_ICRC_SIZE;
+ 			*icrcp = (__be32 *)(addr + len);

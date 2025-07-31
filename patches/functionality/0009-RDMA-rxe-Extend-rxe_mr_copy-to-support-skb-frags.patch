@@ -86,7 +86,7 @@ diff --git a/drivers/infiniband/sw/rxe/rxe_mr.c b/drivers/infiniband/sw/rxe/rxe_
 index 868d2f0..2a0df3f 100644
 --- a/drivers/infiniband/sw/rxe/rxe_mr.c
 +++ b/drivers/infiniband/sw/rxe/rxe_mr.c
-@@ -242,7 +242,59 @@ int rxe_map_mr_sg(struct ib_mr *ibmr, struct scatterlist *sgl,
+@@ -242,7 +242,57 @@ int rxe_map_mr_sg(struct ib_mr *ibmr, struct scatterlist *sgl,
  	return ib_sg_to_pages(ibmr, sgl, sg_nents, sg_offset, rxe_set_page);
  }
  
@@ -105,9 +105,7 @@ index 868d2f0..2a0df3f 100644
 +		return -EINVAL;
 +	}
 +
-+	frag->bv_len = length;
-+	frag->bv_offset = offset;
-+	frag->bv_page = page;
++	skb_frag_fill_page_desc(frag, page, offset, length);
 +	/* because kfree_skb will call put_page() */
 +	get_page(page);
 +	skb_shinfo(skb)->nr_frags++;
