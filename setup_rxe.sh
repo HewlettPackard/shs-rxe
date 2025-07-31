@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#set -x
+set -x
 
 # We don't want to "hard fail" devbootstrap (i.e. build everything builds)
 # used by development on unsupported platforms
@@ -42,6 +42,9 @@ if [[ "${RXE_TARGET}" == "UNKNOWN" ]]; then
 	elif [[ "$rel" = "SUSE Linux Enterprise Server 15 SP6" ]]; then
 		distro="sles"
 		RXE_TARGET=SLES_15_SP6
+	elif [[ "$rel" = "SUSE Linux Enterprise Server 15 SP7" ]]; then
+		distro="sles"
+		RXE_TARGET=SLES_15_SP7
 	elif [[ "$rel" = "Red Hat Enterprise Linux 9.4 (Plow)" ]]; then
 		distro="rhel"
 		RXE_TARGET=RHEL_9_4
@@ -56,9 +59,13 @@ compatibility_files="${distro}/${distro}.series"
 
 if [[ "${RXE_TARGET}" = "SLES_15_SP5" ]]; then
     export QUILT_SERIES=SLES-15-SP5.series
+    compatibility_files="${compatibility_files} ${distro}/sles15_sp6_compatibility.series"
     compatibility_files="${compatibility_files} ${distro}/sles15_sp5_compatibility.series"
 elif [[ "${RXE_TARGET}" = "SLES_15_SP6" ]]; then
     export QUILT_SERIES=SLES-15-SP6.series
+    compatibility_files="${compatibility_files} ${distro}/sles15_sp6_compatibility.series"
+elif [[ "${RXE_TARGET}" = "SLES_15_SP7" ]]; then
+    export QUILT_SERIES=SLES-15-SP7.series
     compatibility_files="${compatibility_files}"
 elif [[ "${RXE_TARGET}" = "RHEL_9_4" ]]; then
     export QUILT_SERIES=RHEL_9_4.series

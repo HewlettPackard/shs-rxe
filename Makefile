@@ -24,7 +24,7 @@ DIST_FILES = \
 	rxe_versions \
 	kmp_files \
 	patches/compatibility/*/*.patch \
-	patches/compatibility/*.series \
+	patches/compatibility/*/*.series \
 	patches/functionality/*.patch \
 	patches/functionality/*.series \
 	patches/upstream/*.patch \

@@ -66,8 +66,8 @@ index c9aa0995e900..393391863350 100644
 +	/* handle any payload in frags */
 +	for (i = 0; i < shinfo->nr_frags; i++) {
 +		frag = &shinfo->frags[i];
-+		addr = page_to_virt(frag->bv_page) + frag->bv_offset;
-+		len = frag->bv_len;
++		addr = page_to_virt(skb_frag_page(frag)) + skb_frag_off(frag);
++		len = skb_frag_size(frag);
 +		if (i == shinfo->nr_frags - 1) {
 +			len -= RXE_ICRC_SIZE;
 +			*icrcp = (__be32 *)(addr + len);
