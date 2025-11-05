@@ -1,0 +1,5 @@
+compatibility/common/2024-09-13_Use_IB_get_netdev_fn_8d1593b2.patch -p1
+compatibility/common/2024-07-04_Introduce_name_assign_type_for_IB_af48f954.patch -p4 -R
+compatibility/common/2024-06-27_Pass_entire_attr_bundle_to_create_cq_dd6d7f85.patch -p4 -R
+compatibility/common/2023-06-27_merge_tag_rcu_af96134d.patch -p4 -R
+compatibility/common/2023-06-20_Fixes_mr_access_list_ee678e5d.patch -p4 -R

@@ -48,8 +48,16 @@ if [[ "${RXE_TARGET}" == "UNKNOWN" ]]; then
 	elif [[ "$rel" = "Red Hat Enterprise Linux 9.4 (Plow)" ]]; then
 		distro="rhel"
 		RXE_TARGET=RHEL_9_4
+	elif [[ "$rel" = "Red Hat Enterprise Linux 9.6 (Plow)" ]]; then
+		distro="rhel"
+		RXE_TARGET=RHEL_9_6
 	else
-	    cleanup_and_fail "Unrecognized target $rel, set RXE_TARGET"
+		if [[ ${RXE_ERR_RET} -eq 0 ]]; then
+			cleanup_and_fail "Unrecognized target $rel, set RXE_TARGET"
+		else
+			echo "Unrecognized target $rel, defaulting to RXE_DEVEL"
+			RXE_TARGET=RXE_DEVEL
+		fi
 	fi
 fi
 
@@ -69,6 +77,9 @@ elif [[ "${RXE_TARGET}" = "SLES_15_SP7" ]]; then
     compatibility_files="${compatibility_files}"
 elif [[ "${RXE_TARGET}" = "RHEL_9_4" ]]; then
     export QUILT_SERIES=RHEL_9_4.series
+    compatibility_files="${compatibility_files} ${distro}/rhel_9_4_compatibility.series"
+elif [[ "${RXE_TARGET}" = "RHEL_9_6" ]]; then
+    export QUILT_SERIES=RHEL_9_6.series
     compatibility_files="${compatibility_files}"
 elif [[ "${RXE_TARGET}" = "RXE_DEVEL" ]]; then
     export QUILT_SERIES=RXE_DEVEL.series
