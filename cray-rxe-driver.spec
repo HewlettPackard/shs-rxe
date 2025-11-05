@@ -10,7 +10,7 @@
 %endif
 
 Name:           cray-rxe-driver
-Version:        5.1.0
+Version:        5.2.0
 Release:        %(echo ${BUILD_METADATA})
 Summary:        Soft RoCE Driver
 License:        GPLv2
