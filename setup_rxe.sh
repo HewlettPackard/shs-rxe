@@ -48,6 +48,9 @@ if [[ "${RXE_TARGET}" == "UNKNOWN" ]]; then
 	elif [[ "$rel" = "Red Hat Enterprise Linux 9.4 (Plow)" ]]; then
 		distro="rhel"
 		RXE_TARGET=RHEL_9_4
+	elif [[ "$rel" = "Red Hat Enterprise Linux 9.5 (Plow)" ]]; then
+		distro="rhel"
+		RXE_TARGET=RHEL_9_5
 	elif [[ "$rel" = "Red Hat Enterprise Linux 9.6 (Plow)" ]]; then
 		distro="rhel"
 		RXE_TARGET=RHEL_9_6
@@ -78,6 +81,10 @@ elif [[ "${RXE_TARGET}" = "SLES_15_SP7" ]]; then
 elif [[ "${RXE_TARGET}" = "RHEL_9_4" ]]; then
     export QUILT_SERIES=RHEL_9_4.series
     compatibility_files="${compatibility_files} ${distro}/rhel_9_4_compatibility.series"
+elif [[ "${RXE_TARGET}" = "RHEL_9_5" ]]; then
+	# 9.5 follows the 9.6 patch stack with targeted compatibility overlays.
+	export QUILT_SERIES=RHEL_9_6.series
+	compatibility_files="${compatibility_files} ${distro}/rhel_9_5_compatibility.series"
 elif [[ "${RXE_TARGET}" = "RHEL_9_6" ]]; then
     export QUILT_SERIES=RHEL_9_6.series
     compatibility_files="${compatibility_files}"
