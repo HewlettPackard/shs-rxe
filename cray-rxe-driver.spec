@@ -10,7 +10,7 @@
 %endif
 
 Name:           cray-rxe-driver
-Version:        5.2.0
+Version:        5.2.1
 Release:        %(echo ${BUILD_METADATA})
 Summary:        Soft RoCE Driver
 License:        GPLv2
@@ -43,6 +43,8 @@ Development files for Cray Enhanced Soft RoCE driver
 Summary:        DKMS support for %{name} kernel modules
 Requires:   quilt
 Requires:       dkms
+Conflicts:      kmod-%{name}
+Conflicts:      %{name}-kmp
 %if 0%{?sle_version} >= 150200
 # Make sure a SLES release file is installed
 Requires:   sles-release
@@ -132,7 +134,8 @@ rm -f %{buildroot}${dkms_source_dir}/dkms.conf.in
 
 %pre dkms
 
-%post dkms
+# DKMS build/install runs in the posttrans scriptlet so the old module is removed first on upgrade.
+%posttrans dkms
 if [ -f /usr/libexec/dkms/common.postinst ] && [ -x /usr/libexec/dkms/common.postinst ]
 then
     postinst=/usr/libexec/dkms/common.postinst
@@ -163,3 +166,6 @@ install -D %{dkms_source_tree}/%{name}-%{version}-%{release}/scripts/rxe_init.sh
 %files dkms -f dkms-files
 
 %changelog
+* Wed Sep 02 2026 Patrick Bueb <patrick.bueb@hpe.com> 5.2.1
+- Move the DKMS build/install to the posttrans scriptlet so the old module is removed first on upgrade.
+- Add kmod/dkms Conflicts and kmod Obsoletes/Provides for a clean method switch.
